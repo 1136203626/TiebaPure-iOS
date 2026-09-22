@@ -5,35 +5,24 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DERIVED_DATA: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Show Xcode
         run: |
           ls /Applications | grep -i xcode || true
-          # 优先用较新的 Xcode
-          if [ -d /Applications/Xcode_16.4.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.4.app
-          elif [ -d /Applications/Xcode_16.3.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.3.app
-          elif [ -d /Applications/Xcode_16.2.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.2.app
-          elif [ -d /Applications/Xcode_16.1.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.1.app
-          elif [ -d /Applications/Xcode_16.0.app ]; then
-            sudo xcode-select -s /Applications/Xcode_16.0.app
-          else
-            sudo xcode-select -s /Applications/Xcode.app
+          if [ ! -d /Applications/Xcode_26.6.app ]; then
+            echo "Xcode_26.6 not found, fallback to default"
+            unset DEVELOPER_DIR
+            sudo xcode-select -s /Applications/Xcode.app || true
           fi
           xcodebuild -version
-
-      - name: Resolve packages
-        run: |
-          xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
-            -resolvePackageDependencies \
-            -derivedDataPath build
+          xcodebuild -showsdks
 
       - name: Release build (unsigned)
         run: |
@@ -42,26 +31,24 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath build \
+            -derivedDataPath "$DERIVED_DATA" \
             build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGN_ENTITLEMENTS="" \
-            DEVELOPMENT_TEAM="" \
-            PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
             2>&1 | tee build.log
-          # 失败时把关键错误打出来方便排查
-          if [ ${PIPESTATUS[0]} -ne 0 ]; then
-            echo "===== LAST 80 LINES OF BUILD LOG ====="
-            tail -80 build.log
-            exit 74
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            echo "===== BUILD FAILED, LAST 120 LINES ====="
+            tail -120 build.log
+            echo "===== ERROR LINES ====="
+            grep -E "error:|❌|fatal" build.log | tail -40 || true
+            exit "$status"
           fi
 
       - name: Package IPA
         run: |
-          APP="build/Build/Products/Release-iphoneos/TiebaPure.app"
+          APP="$DERIVED_DATA/Build/Products/Release-iphoneos/TiebaPure.app"
           test -d "$APP"
           rm -rf Payload
           mkdir -p Payload
