@@ -1358,9 +1358,14 @@ struct InlineContentText: UIViewRepresentable {
         let result = NSMutableAttributedString()
         let font = style.font(readerFontSize: readerFontSize, readerFontFamily: readerFontFamily)
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = ReaderTypographyPolicy.lineSpacing(
+        let extraSpacing = ReaderTypographyPolicy.lineSpacing(
             readerLineSpacing,
             context: style == .subpost ? .subpost : .body
+        )
+        paragraph.lineSpacing = extraSpacing
+        // Ensure CJK glyphs at large reader sizes cannot stack on the previous line.
+        paragraph.minimumLineHeight = font.lineHeight * ReaderTypographyPolicy.minimumLineHeightMultiplier(
+            readerLineSpacing
         )
         paragraph.lineBreakMode = ThreadContentDisplayPolicy.paragraphLineBreakMode
 

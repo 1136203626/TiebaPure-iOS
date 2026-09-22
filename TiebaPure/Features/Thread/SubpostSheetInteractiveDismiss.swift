@@ -269,8 +269,11 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
             Task { @MainActor in
                 await Task.yield()
                 guard dismissGestureIsActive == false else { return }
-                if phase == .tracking {
+                if phase == .tracking, activeDismissAxis == .rightSwipe {
+                    // Only animate restore for an intentional right-swipe cancel.
                     restore()
+                } else if phase == .tracking {
+                    cancelInterruptedGesture()
                 } else if phase == .idle, rejectedCurrentGesture {
                     // A vertical/leftward gesture can be rejected before the
                     // phase enters tracking. If the system cancels it without
@@ -320,13 +323,11 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
         }
 
         if phase == .idle {
+            // Pull-down dismiss fights ScrollView when returning to the top of
+            // the reply list (restore animation loops, content never settles).
+            // Keep right-edge swipe + toolbar "完成" only.
             if SubpostRightSwipeDismissPolicy.shouldBegin(translation: translation) {
                 activeDismissAxis = .rightSwipe
-            } else if SubpostPullDownDismissPolicy.shouldBegin(
-                translation: translation,
-                isContentAtTop: isContentAtTop
-            ) {
-                activeDismissAxis = .pullDown
             } else {
                 rejectedCurrentGesture = true
                 return
@@ -400,6 +401,9 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
         _ event: LegacyScrollPanEvent,
         containerSize: CGSize
     ) {
+        // Disabled: pull-down via scroll telemetry competed with scrolling back
+        // to the first reply. Dismiss remains available via swipe-right / 完成.
+        return
         if #available(iOS 17.0, *) { return }
 
         switch event.state {
