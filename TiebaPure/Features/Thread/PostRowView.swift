@@ -46,7 +46,7 @@ struct PostRowView: View {
         ) {
             VStack(
                 alignment: .leading,
-                spacing: isMainPost ? TiebaPureTheme.Spacing.md : ThreadReplyLayout.headerContentSpacing
+                spacing: isMainPost ? TiebaPureTheme.Spacing.lg : ThreadReplyLayout.headerContentSpacing
             ) {
                 UserHeaderView(
                     author: post.author,
@@ -63,6 +63,7 @@ struct PostRowView: View {
                         : "thread-like-button-\(post.id)",
                     onOpenUser: onOpenUser.map { open in { open(post.author) } }
                 )
+                .zIndex(1)
 
                 VStack(alignment: .leading, spacing: ThreadReplyLayout.bodyStackSpacing) {
                     if isMainPost, let threadTitle, threadTitle.isEmpty == false {
@@ -117,6 +118,8 @@ struct PostRowView: View {
                     }
                 }
                 .padding(.leading, isMainPost ? 0 : ThreadReplyLayout.bodyLeadingInset)
+                .zIndex(0)
+                .layoutPriority(1)
             }
         }
     }

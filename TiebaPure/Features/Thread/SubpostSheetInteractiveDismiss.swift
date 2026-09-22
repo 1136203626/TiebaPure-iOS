@@ -252,9 +252,10 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
         }
         .onPreferenceChange(SubpostSheetScrollTopPreferenceKey.self) { contentTop in
             guard let contentTop, contentTop.isFinite else { return }
-            let baseline = max(contentTopBaseline ?? contentTop, contentTop)
-            contentTopBaseline = baseline
-            isContentAtTop = contentTop >= baseline - 1
+            // Only treat true top-of-list as dismissible pull-down; avoids
+            // mid-list downward drags entering restore animation loops.
+            contentTopBaseline = contentTop
+            isContentAtTop = contentTop >= -1 && contentTop <= 8
         }
         .compatibleOnChange(of: scenePhase) { _, newPhase in
             guard newPhase != .active else { return }
@@ -706,15 +707,16 @@ enum SubpostRightSwipeDismissPolicy {
 }
 
 enum SubpostPullDownDismissPolicy {
-    static let verticalDominance: CGFloat = 1.15
-    static let completionProgress: CGFloat = 0.18
-    static let completionDistance: CGFloat = 120
-    static let predictedCompletionDistance: CGFloat = 240
+    static let verticalDominance: CGFloat = 1.6
+    static let minimumPullDistance: CGFloat = 28
+    static let completionProgress: CGFloat = 0.22
+    static let completionDistance: CGFloat = 140
+    static let predictedCompletionDistance: CGFloat = 260
     static let maximumInteractiveOffsetFraction: CGFloat = 0.72
 
     static func shouldBegin(translation: CGSize, isContentAtTop: Bool) -> Bool {
         isContentAtTop
-            && translation.height > 0
+            && translation.height >= minimumPullDistance
             && translation.height > abs(translation.width) * verticalDominance
     }
 
