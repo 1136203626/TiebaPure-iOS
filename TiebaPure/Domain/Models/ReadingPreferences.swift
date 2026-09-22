@@ -247,8 +247,24 @@ enum ReaderTypographyPolicy {
         _ preference: ReaderLineSpacing,
         context: ReaderTextContext
     ) -> CGFloat {
-        let standardSpacing: CGFloat = context == .subpost ? 2 : 4
+        // Previous values (2/4) were too tight for CJK body text at large sizes
+        // and caused glyph overlap inside UITextView runs.
+        let standardSpacing: CGFloat = context == .subpost ? 5 : 9
         return standardSpacing * preference.multiplier
+    }
+
+    /// Minimum line height as a multiple of the font's lineHeight.
+    static func minimumLineHeightMultiplier(
+        _ preference: ReaderLineSpacing
+    ) -> CGFloat {
+        switch preference {
+        case .compact:
+            return 1.15
+        case .standard:
+            return 1.28
+        case .relaxed:
+            return 1.45
+        }
     }
 }
 
