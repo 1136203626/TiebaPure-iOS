@@ -2,37 +2,72 @@ name: Build IPA
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 jobs:
   build:
-    runs-on: macos-14
-    timeout-minutes: 45
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          # 优先用较新的 Xcode
+          if [ -d /Applications/Xcode_16.4.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.4.app
+          elif [ -d /Applications/Xcode_16.3.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.3.app
+          elif [ -d /Applications/Xcode_16.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app
+          elif [ -d /Applications/Xcode_16.1.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.1.app
+          elif [ -d /Applications/Xcode_16.0.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.0.app
+          else
+            sudo xcode-select -s /Applications/Xcode.app
+          fi
+          xcodebuild -version
 
-      - name: Generate Xcode project
-        run: xcodegen generate --spec project.yml
+      - name: Resolve packages
+        run: |
+          xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
+            -resolvePackageDependencies \
+            -derivedDataPath build
 
       - name: Release build (unsigned)
         run: |
+          set -o pipefail
           xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
-            -configuration Release -sdk iphoneos \
+            -configuration Release \
+            -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
-            build CODE_SIGNING_ALLOWED=NO
+            build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
+            2>&1 | tee build.log
+          # 失败时把关键错误打出来方便排查
+          if [ ${PIPESTATUS[0]} -ne 0 ]; then
+            echo "===== LAST 80 LINES OF BUILD LOG ====="
+            tail -80 build.log
+            exit 74
+          fi
 
       - name: Package IPA
         run: |
           APP="build/Build/Products/Release-iphoneos/TiebaPure.app"
+          test -d "$APP"
+          rm -rf Payload
           mkdir -p Payload
           cp -R "$APP" Payload/
-          zip -r TiebaPure-search-fix.ipa Payload
-          rm -rf Payload
+          zip -qr TiebaPure-search-fix.ipa Payload
+          ls -lh TiebaPure-search-fix.ipa
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4
