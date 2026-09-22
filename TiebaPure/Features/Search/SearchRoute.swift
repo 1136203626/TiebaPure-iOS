@@ -24,6 +24,6 @@ enum NestedSearchOpenRoutingPolicy {
         }
         // iOS 16 can recurse through trait and layout updates when a view that
         // is already a NavigationStack destination pushes another Bool route.
-        return systemMajorVersion < 17 ? .standaloneSearch : .localSearch
+        return .standaloneSearch
     }
 }
