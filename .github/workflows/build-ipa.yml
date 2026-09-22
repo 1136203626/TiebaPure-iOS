@@ -7,48 +7,83 @@ jobs:
   build:
     runs-on: macos-26
     timeout-minutes: 60
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
-      DERIVED_DATA: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show Xcode
+      - name: Select Xcode
         run: |
+          echo "Available Xcode apps:"
           ls /Applications | grep -i xcode || true
-          if [ ! -d /Applications/Xcode_26.6.app ]; then
-            echo "Xcode_26.6 not found, fallback to default"
-            unset DEVELOPER_DIR
-            sudo xcode-select -s /Applications/Xcode.app || true
+          SELECTED=""
+          for c in \
+            /Applications/Xcode_26.6.app \
+            /Applications/Xcode_26.5.app \
+            /Applications/Xcode_26.4.app \
+            /Applications/Xcode_26.3.app \
+            /Applications/Xcode_26.2.app \
+            /Applications/Xcode_26.1.app \
+            /Applications/Xcode_26.0.app \
+            /Applications/Xcode_16.4.app \
+            /Applications/Xcode_16.3.app \
+            /Applications/Xcode.app
+          do
+            if [ -d "$c" ]; then
+              SELECTED="$c"
+              break
+            fi
+          done
+          if [ -z "$SELECTED" ]; then
+            echo "No Xcode found under /Applications"
+            exit 1
           fi
+          echo "Using $SELECTED"
+          sudo xcode-select -s "$SELECTED"
+          # Must persist to later steps (job-level env alone is not enough if path missing)
+          echo "DEVELOPER_DIR=$SELECTED/Contents/Developer" >> "$GITHUB_ENV"
           xcodebuild -version
           xcodebuild -showsdks
+
+      - name: Resolve packages
+        run: |
+          xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
+            -resolvePackageDependencies \
+            -derivedDataPath "${{ github.workspace }}/build"
 
       - name: Release build (unsigned)
         run: |
           set -o pipefail
+          echo "DEVELOPER_DIR=${DEVELOPER_DIR:-unset}"
           xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -derivedDataPath "$DERIVED_DATA" \
+            -derivedDataPath "${{ github.workspace }}/build" \
             build \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
             2>&1 | tee build.log
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
-            echo "===== BUILD FAILED, LAST 120 LINES ====="
-            tail -120 build.log
+            echo "===== BUILD FAILED, LAST 150 LINES ====="
+            tail -150 build.log
             echo "===== ERROR LINES ====="
-            grep -E "error:|❌|fatal" build.log | tail -40 || true
+            grep -E "error:|❌|fatal" build.log | tail -50 || true
             exit "$status"
           fi
 
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
       - name: Package IPA
         run: |
-          APP="$DERIVED_DATA/Build/Products/Release-iphoneos/TiebaPure.app"
+          APP="${{ github.workspace }}/build/Build/Products/Release-iphoneos/TiebaPure.app"
           test -d "$APP"
           rm -rf Payload
           mkdir -p Payload
