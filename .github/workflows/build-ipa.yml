@@ -1,0 +1,41 @@
+name: Build IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Release build (unsigned)
+        run: |
+          xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
+            -configuration Release -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            build CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          APP="build/Build/Products/Release-iphoneos/TiebaPure.app"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -r TiebaPure-search-fix.ipa Payload
+          rm -rf Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: TiebaPure-search-fix
+          path: TiebaPure-search-fix.ipa
