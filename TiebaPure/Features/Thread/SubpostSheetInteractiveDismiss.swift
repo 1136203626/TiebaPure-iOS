@@ -403,65 +403,8 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
     ) {
         // Disabled: pull-down via scroll telemetry competed with scrolling back
         // to the first reply. Dismiss remains available via swipe-right / 完成.
-        return
-        if #available(iOS 17.0, *) { return }
-
-        switch event.state {
-        case .began:
-            legacyPullDownStartedAtTop = isContentAtTop
-            legacyPullDownRejected = false
-        case .changed:
-            guard isEnabled,
-                  phase != .dismissing,
-                  phase != .restoring,
-                  legacyPullDownRejected == false else {
-                return
-            }
-            if phase == .idle {
-                let distance = hypot(event.translation.width, event.translation.height)
-                guard distance >= SubpostRightSwipeDismissPolicy.minimumTrackingDistance else {
-                    return
-                }
-                guard SubpostPullDownDismissPolicy.shouldBegin(
-                    translation: event.translation,
-                    isContentAtTop: legacyPullDownStartedAtTop
-                ) else {
-                    legacyPullDownRejected = true
-                    return
-                }
-                activeDismissAxis = .pullDown
-                phase = .tracking
-            }
-            guard phase == .tracking, activeDismissAxis == .pullDown else { return }
-            verticalOffset = SubpostPullDownDismissPolicy.verticalOffset(
-                translationY: event.translation.height,
-                containerHeight: containerSize.height
-            )
-        case .ended:
-            defer { resetLegacyPullDownGesture() }
-            guard phase == .tracking, activeDismissAxis == .pullDown else { return }
-            if SubpostPullDownDismissPolicy.shouldFinish(
-                translationY: event.translation.height,
-                predictedTranslationY: event.translation.height,
-                containerHeight: containerSize.height
-            ) {
-                finishDismissal(containerHeight: containerSize.height)
-            } else {
-                restore()
-            }
-        case .cancelled, .failed:
-            defer { resetLegacyPullDownGesture() }
-            if phase == .tracking, activeDismissAxis == .pullDown {
-                restore()
-            }
-        case .possible:
-            break
-        @unknown default:
-            defer { resetLegacyPullDownGesture() }
-            if phase == .tracking, activeDismissAxis == .pullDown {
-                restore()
-            }
-        }
+        _ = event
+        _ = containerSize
     }
 
     private func resetLegacyPullDownGesture() {
