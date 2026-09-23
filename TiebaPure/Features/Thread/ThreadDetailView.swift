@@ -2835,17 +2835,6 @@ private struct SubpostListSheet: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            GeometryReader { proxy in
-                                Color.clear.preference(
-                                    key: SubpostSheetScrollTopPreferenceKey.self,
-                                    value: Optional(proxy.frame(
-                                        in: .named(SubpostSheetScrollCoordinateSpace.name)
-                                    ).minY)
-                                )
-                            }
-                            .frame(height: 0)
-                            .accessibilityHidden(true)
-
                             ReaderCard(
                                 showsDivider: false,
                                 contentBottomPadding: ThreadPostMetadataPlacement.standaloneReply.cardBottomPadding
@@ -2952,8 +2941,6 @@ private struct SubpostListSheet: View {
                         }
                         .readableWidth()
                     }
-                    .coordinateSpace(name: SubpostSheetScrollCoordinateSpace.name)
-                    .subpostSheetLegacyScrollTelemetry()
                     .background(TiebaPureTheme.ColorToken.readerGroupedBackground)
                 }
                 }
