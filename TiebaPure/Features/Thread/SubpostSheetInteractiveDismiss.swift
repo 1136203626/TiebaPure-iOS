@@ -154,10 +154,6 @@ struct SubpostSheetInteractiveDismissSurface<Content: View>: View {
                         finishDismissal(containerHeight: containerSize.height)
                     }
                 )
-                .simultaneousGesture(
-                    dismissGesture(containerSize: containerSize),
-                    isEnabled: isEnabled && phase != .dismissing
-                )
                 .accessibilityAction(named: "关闭楼中楼") {
                     finishDismissal(containerHeight: containerSize.height)
                 }
