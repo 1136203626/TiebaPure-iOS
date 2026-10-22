@@ -1977,34 +1977,29 @@ final class ImagePreviewPresentationState {
 
 @MainActor
 enum MediaPreviewTouchDeliveryReset {
-    /// Clears stuck window/root gesture state left after modal media dismiss.
-    /// Animations keep running (main thread is fine); only hit-testing is dead
-    /// until the app backgrounds — which is the symptom users reported.
+    /// Clears stuck gesture state after modal media dismiss without blanking
+    /// the root view (toggling `isUserInteractionEnabled` off caused a long
+    /// wait before the feed could scroll again).
     static func run() {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         for scene in scenes {
             for window in scene.windows where window.isHidden == false {
                 window.isUserInteractionEnabled = true
-                // Bounce recognizers that may be stuck in .began after an
-                // interactive swipe-to-dismiss without a clean touchesEnded.
                 for recognizer in window.gestureRecognizers ?? [] {
+                    let wasEnabled = recognizer.isEnabled
                     recognizer.isEnabled = false
-                    recognizer.isEnabled = true
+                    recognizer.isEnabled = wasEnabled
                 }
                 if let root = window.rootViewController?.view {
                     root.isUserInteractionEnabled = true
                     for recognizer in root.gestureRecognizers ?? [] {
+                        let wasEnabled = recognizer.isEnabled
                         recognizer.isEnabled = false
-                        recognizer.isEnabled = true
+                        recognizer.isEnabled = wasEnabled
                     }
-                    // Brief toggle forces UIKit to rebuild the hit-test tree.
-                    root.isUserInteractionEnabled = false
-                    root.isUserInteractionEnabled = true
                 }
             }
         }
-        // Drop any leftover feed-thumbnail suppressions that survived a raced
-        // hero cleanup (cells stay non-interactive while GIFs still animate).
         ImagePreviewSourceRegistry.shared.endAllSuppressions()
     }
 }
@@ -2023,8 +2018,12 @@ private final class ImagePreviewDismissRelay {
         // swipe-closing a feed GIF freezes the entire app (no touch response).
         controller.prepareSimpleDismissal()
         controller.beginDismissalIfNeeded()
-        controller.dismiss(animated: ImagePreviewTransitionMotionPolicy.animationsEnabled) {
+        // Unlock the underlying feed immediately; do not wait for a long
+        // system dismiss animation before hit-testing works again.
+        MediaPreviewTouchDeliveryReset.run()
+        controller.dismiss(animated: false) {
             controller.finishDismissalIfNeeded()
+            MediaPreviewTouchDeliveryReset.run()
         }
     }
 }
@@ -2371,13 +2370,6 @@ final class ImagePreviewCoordinator {
 #endif
         _ = arbiter.dismissalDidFinish(request)
         MediaPreviewTouchDeliveryReset.run()
-        // Second pass after UIKit finishes tearing down the presented host.
-        DispatchQueue.main.async {
-            MediaPreviewTouchDeliveryReset.run()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            MediaPreviewTouchDeliveryReset.run()
-        }
     }
 
     private func cancelPresentation(
