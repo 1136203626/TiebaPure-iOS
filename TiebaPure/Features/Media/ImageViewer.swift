@@ -1793,21 +1793,27 @@ final class MediaPreviewDismissalInteractionGate: UIGestureRecognizer,
         true
     }
 
-    /// If a touch is already in flight, keep the old lifecycle until it ends so
-    /// its intent can be queued before the coordinator becomes idle. Otherwise
-    /// finish immediately but leave this non-cancelling observer armed for the
-    /// first post-dismissal touch; SwiftUI occasionally needs that replay even
-    /// though UIKit has already completed the modal transition.
+    /// Finish immediately when the modal transition ends.
+    ///
+    /// Waiting for an in-flight touch (the swipe-to-dismiss pan) used to leave
+    /// this window-level recognizer armed forever when UIKit never delivered
+    /// `touchesEnded` cleanly. That froze the home feed after closing a GIF
+    /// opened from the list. Replay any pending tap asynchronously instead.
     func transitionDidComplete(completion: @escaping () -> Void) {
         guard didCompleteTransition == false else { return }
         didCompleteTransition = true
-        transitionCompletion = completion
-        if didObserveFirstTouch == false {
-            transitionCompletion = nil
-            completion()
-            return
+        let pendingPoint = pendingTapPoint
+        pendingTapPoint = nil
+        initialWindowPoint = nil
+        transitionCompletion = nil
+        let window = view as? UIWindow
+        removeFromWindow()
+        completion()
+        if let pendingPoint, let window {
+            DispatchQueue.main.async { [onTapAtWindowPoint] in
+                onTapAtWindowPoint(pendingPoint, window)
+            }
         }
-        finishIfPossible()
     }
 
     func cancel() {
@@ -1818,17 +1824,13 @@ final class MediaPreviewDismissalInteractionGate: UIGestureRecognizer,
     }
 
     private func finishIfPossible() {
-        guard didCompleteTransition, initialWindowPoint == nil else {
-            return
-        }
+        // Kept for touchesEnded / touchesCancelled while the transition is
+        // still running. Once `transitionDidComplete` runs, the gate is gone.
+        guard didCompleteTransition == false else { return }
+        guard initialWindowPoint == nil else { return }
         if let pendingTapPoint, let window = view as? UIWindow {
             self.pendingTapPoint = nil
             onTapAtWindowPoint(pendingTapPoint, window)
-        }
-        removeFromWindow()
-        if let transitionCompletion {
-            self.transitionCompletion = nil
-            transitionCompletion()
         }
     }
 
@@ -2159,8 +2161,20 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
             return
         }
         self.dismissalInteractionGate = nil
-        dismissalInteractionGate.transitionDidComplete {
+        var didFinishCoordinator = false
+        let finishOnce = {
+            guard didFinishCoordinator == false else { return }
+            didFinishCoordinator = true
             finish(sessionID)
+        }
+        dismissalInteractionGate.transitionDidComplete {
+            finishOnce()
+        }
+        // Hard safety: interactive GIF dismiss from the feed can miss a touch
+        // end event and must not leave the global media arbiter stuck.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            dismissalInteractionGate.cancel()
+            finishOnce()
         }
     }
 
