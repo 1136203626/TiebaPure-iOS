@@ -338,7 +338,7 @@ struct ImagePreviewSession: Identifiable {
             totalCount: images.count
         )
         self.sourceFrame = ImagePreviewTransitionGeometry.validSourceFrame(sourceFrame)
-        self.sourceImage = sourceImage
+        self.sourceImage = FullScreenImageStillFrame.image(from: sourceImage)
         self.sourceAnchor = sourceAnchor
         sourceToken = sourceAnchor?.transitionToken
         self.sourceIdentity = sourceIdentity ?? sourceAnchor?.sourceIdentity
@@ -2019,6 +2019,14 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         presentationController?.delegate = self
+        // Feed-list GIF thumbnails can race the custom hero completion path so
+        // `didFinishPresentation` never flips. Without that flag swipe-to-dismiss
+        // is permanently disabled while the static-image path from post detail
+        // still works. Unlock here regardless of how the transition finished.
+        finishPresentationIfNeeded()
+        DispatchQueue.main.async { [weak self] in
+            self?.finishPresentationIfNeeded()
+        }
     }
 
     func presentationControllerWillDismiss(_ presentationController: UIPresentationController) {
@@ -4545,6 +4553,21 @@ enum ImagePreviewIndexPolicy {
     static func clampedIndex(_ index: Int, totalCount: Int) -> Int {
         guard totalCount > 0 else { return 0 }
         return min(max(index, 0), totalCount - 1)
+    }
+}
+
+
+enum FullScreenImageStillFrame {
+    /// Animated UIImage instances (GIF/WebP) keep every frame in `images`.
+    /// Hero transitions and dismiss gating must use a single still bitmap;
+    /// otherwise the custom transition can fail to publish completion when the
+    /// preview is opened from an animating feed thumbnail.
+    static func image(from image: UIImage?) -> UIImage? {
+        guard let image else { return nil }
+        if let frames = image.images, let first = frames.first {
+            return first
+        }
+        return image
     }
 }
 

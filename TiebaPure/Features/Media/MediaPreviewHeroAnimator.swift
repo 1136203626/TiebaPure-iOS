@@ -108,7 +108,7 @@ final class MediaPreviewHeroAnimator: NSObject,
         guard let sourceView = participant.mediaPreviewStableSourceView(
             in: sourceController
         ),
-        let image = sourceView.image,
+        let image = FullScreenImageStillFrame.image(from: sourceView.image),
         let sourceFrame = ImagePreviewTransitionGeometry.validSourceFrame(
             sourceView.convert(sourceView.bounds, to: containerView)
         ) else {
