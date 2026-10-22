@@ -43,6 +43,11 @@ jobs:
           xcodebuild -version
           xcodebuild -showsdks
 
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+          
       - name: Resolve packages
         run: |
           xcodebuild -project TiebaPure.xcodeproj -scheme TiebaPure \
