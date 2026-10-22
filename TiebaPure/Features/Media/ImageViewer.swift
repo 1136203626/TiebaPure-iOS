@@ -426,6 +426,22 @@ final class ImagePreviewSourceRegistry {
         }
     }
 
+    func endAllSuppressions() {
+        let identities = Array(suppressionCounts.keys)
+        for identity in identities {
+            // Force full restore regardless of nested count.
+            suppressionCounts[identity] = 1
+            endSuppression(identity: identity)
+        }
+        // Catch orphans with entries but zero counts.
+        for identity in Array(suppressedEntries.keys) {
+            if suppressionCounts[identity] == nil {
+                suppressionCounts[identity] = 1
+                endSuppression(identity: identity)
+            }
+        }
+    }
+
     private func isSuppressed(_ identity: String) -> Bool {
         (suppressionCounts[identity] ?? 0) > 0
     }
@@ -1958,6 +1974,41 @@ final class ImagePreviewPresentationState {
     }
 }
 
+
+@MainActor
+enum MediaPreviewTouchDeliveryReset {
+    /// Clears stuck window/root gesture state left after modal media dismiss.
+    /// Animations keep running (main thread is fine); only hit-testing is dead
+    /// until the app backgrounds — which is the symptom users reported.
+    static func run() {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        for scene in scenes {
+            for window in scene.windows where window.isHidden == false {
+                window.isUserInteractionEnabled = true
+                // Bounce recognizers that may be stuck in .began after an
+                // interactive swipe-to-dismiss without a clean touchesEnded.
+                for recognizer in window.gestureRecognizers ?? [] {
+                    recognizer.isEnabled = false
+                    recognizer.isEnabled = true
+                }
+                if let root = window.rootViewController?.view {
+                    root.isUserInteractionEnabled = true
+                    for recognizer in root.gestureRecognizers ?? [] {
+                        recognizer.isEnabled = false
+                        recognizer.isEnabled = true
+                    }
+                    // Brief toggle forces UIKit to rebuild the hit-test tree.
+                    root.isUserInteractionEnabled = false
+                    root.isUserInteractionEnabled = true
+                }
+            }
+        }
+        // Drop any leftover feed-thumbnail suppressions that survived a raced
+        // hero cleanup (cells stay non-interactive while GIFs still animate).
+        ImagePreviewSourceRegistry.shared.endAllSuppressions()
+    }
+}
+
 @MainActor
 private final class ImagePreviewDismissRelay {
     weak var controller: ImagePreviewHostingController?
@@ -1968,6 +2019,9 @@ private final class ImagePreviewDismissRelay {
               controller.isBeingDismissed == false else {
             return
         }
+        // Skip custom hero dismissal. Incomplete completeTransition after
+        // swipe-closing a feed GIF freezes the entire app (no touch response).
+        controller.prepareSimpleDismissal()
         controller.beginDismissalIfNeeded()
         controller.dismiss(animated: ImagePreviewTransitionMotionPolicy.animationsEnabled) {
             controller.finishDismissalIfNeeded()
@@ -1991,6 +2045,7 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     private var didBeginDismissal = false
     private var didFinishDismissal = false
     private var dismissalInteractionGate: MediaPreviewDismissalInteractionGate?
+    private var prefersSimpleDismissal = false
 
     init(
         session: ImagePreviewSession,
@@ -2058,7 +2113,16 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     func animationController(
         forDismissed dismissed: UIViewController
     ) -> UIViewControllerAnimatedTransitioning? {
-        MediaPreviewHeroAnimator(operation: .dismissal, participant: self)
+        if prefersSimpleDismissal {
+            return nil
+        }
+        return MediaPreviewHeroAnimator(operation: .dismissal, participant: self)
+    }
+
+    func prepareSimpleDismissal() {
+        prefersSimpleDismissal = true
+        // Drop custom transitioning so UIKit owns the dismiss animation end-to-end.
+        transitioningDelegate = nil
     }
 
     var mediaPreviewHeroSourceIdentity: String? {
@@ -2138,44 +2202,16 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
         guard didBeginDismissal == false else { return }
         didBeginDismissal = true
         onDismissalBegan(session.id)
-        if let window = view.window {
-            dismissalInteractionGate = MediaPreviewDismissalInteractionGate(
-                onTapAtWindowPoint: { point, window in
-                    ImagePreviewSourceRegistry.shared.activateSource(
-                        at: point,
-                        in: window
-                    )
-                }
-            )
-            .installed(in: window)
-        }
+        // Never install a window-level interaction gate. It has left the home
+        // feed completely unresponsive after closing GIF previews.
     }
 
     func finishDismissalIfNeeded() {
         guard didFinishDismissal == false else { return }
         didFinishDismissal = true
-        let finish = onDismissalFinished
-        let sessionID = session.id
-        guard let dismissalInteractionGate else {
-            finish(sessionID)
-            return
-        }
-        self.dismissalInteractionGate = nil
-        var didFinishCoordinator = false
-        let finishOnce = {
-            guard didFinishCoordinator == false else { return }
-            didFinishCoordinator = true
-            finish(sessionID)
-        }
-        dismissalInteractionGate.transitionDidComplete {
-            finishOnce()
-        }
-        // Hard safety: interactive GIF dismiss from the feed can miss a touch
-        // end event and must not leave the global media arbiter stuck.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            dismissalInteractionGate.cancel()
-            finishOnce()
-        }
+        dismissalInteractionGate?.cancel()
+        dismissalInteractionGate = nil
+        onDismissalFinished(session.id)
     }
 
     func heroPresentationDidCancel() {
@@ -2334,6 +2370,14 @@ final class ImagePreviewCoordinator {
         ImageDismissScrollRaceProbe.shared.dismissalDidFinish(sessionID: sessionID)
 #endif
         _ = arbiter.dismissalDidFinish(request)
+        MediaPreviewTouchDeliveryReset.run()
+        // Second pass after UIKit finishes tearing down the presented host.
+        DispatchQueue.main.async {
+            MediaPreviewTouchDeliveryReset.run()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            MediaPreviewTouchDeliveryReset.run()
+        }
     }
 
     private func cancelPresentation(
@@ -2347,6 +2391,8 @@ final class ImagePreviewCoordinator {
         if activeController?.session.id == sessionID {
             activeController = nil
         }
+    
+        MediaPreviewTouchDeliveryReset.run()
     }
 
     private func cancelDismissal(
@@ -2355,6 +2401,8 @@ final class ImagePreviewCoordinator {
     ) {
         guard sessionID == request.id else { return }
         _ = arbiter.dismissalDidCancel(request)
+    
+        MediaPreviewTouchDeliveryReset.run()
     }
 
     static func topPresenter() -> UIViewController? {
@@ -3563,6 +3611,12 @@ private final class FullScreenZoomImageController: UIViewController,
             )
             if shouldDismiss {
                 isCompletingDismissGesture = true
+                scrollView.transform = .identity
+                dismissPanGestureRecognizer.isEnabled = false
+                dismissPanGestureRecognizer.isEnabled = true
+                if resolvedImageView.isAnimating {
+                    resolvedImageView.stopAnimating()
+                }
                 reportResolvedImageLayoutIfPossible()
                 onInteractiveDismiss?()
             } else {
