@@ -3322,6 +3322,9 @@ private final class FullScreenZoomImageController: UIViewController,
     private func commitStashedResolvedImage() {
         guard let resolvedImage, resolvedImageView.image !== resolvedImage else { return }
         resolvedImageView.image = resolvedImage
+        if (resolvedImage.images?.count ?? 0) > 1 {
+            resolvedImageView.startAnimating()
+        }
     }
 
     private func startOriginalImageLoading() {
@@ -3390,6 +3393,12 @@ private final class FullScreenZoomImageController: UIViewController,
 
     private func startAutomaticResolutionUpgradeIfNeeded() {
         guard didResolveAutomaticPreview, let image = resolvedImage else { return }
+        // Multi-frame GIF/WebP previews must not upgrade to a full-size animated
+        // original. Decoding and swapping that bitmap freezes the main thread and
+        // leaves the viewer unable to accept swipe-to-dismiss.
+        if (image.images?.count ?? 0) > 1 {
+            return
+        }
         let pixelSize = CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width * image.scale,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height * image.scale
@@ -3427,6 +3436,9 @@ private final class FullScreenZoomImageController: UIViewController,
         let changes = { [weak self] in
             guard let self else { return }
             self.resolvedImageView.image = image
+            if (image.images?.count ?? 0) > 1 {
+                self.resolvedImageView.startAnimating()
+            }
             self.resolvedImageView.alpha = 1
             self.placeholderImageView.alpha = 0
             self.didRevealResolvedImage = true
@@ -3497,6 +3509,7 @@ private final class FullScreenZoomImageController: UIViewController,
         let pan = dismissPanGestureRecognizer
         activeDismissAxis = FullScreenImageDismissGesturePolicy.axis(
             velocity: pan.velocity(in: view),
+            translation: pan.translation(in: view),
             isFirstImage: imageIndex == 0,
             isZoomed: FullScreenImageZoomPolicy.isZoomed(scrollView.zoomScale)
         )
@@ -3511,6 +3524,9 @@ private final class FullScreenZoomImageController: UIViewController,
         )
         switch recognizer.state {
         case .changed:
+            if resolvedImageView.isAnimating {
+                resolvedImageView.stopAnimating()
+            }
             scrollView.transform = CGAffineTransform(
                 translationX: translation.x,
                 y: translation.y
@@ -3541,6 +3557,9 @@ private final class FullScreenZoomImageController: UIViewController,
 
     private func restoreImageAfterCancelledDismissal() {
         isCompletingDismissGesture = true
+        if (resolvedImage?.images?.count ?? 0) > 1 {
+            resolvedImageView.startAnimating()
+        }
         guard UIAccessibility.isReduceMotionEnabled == false else {
             scrollView.transform = .identity
             isCompletingDismissGesture = false
@@ -4563,16 +4582,29 @@ enum FullScreenImageDismissGesturePolicy {
 
     static func axis(
         velocity: CGPoint,
+        translation: CGPoint = .zero,
         isFirstImage: Bool,
         isZoomed: Bool
     ) -> FullScreenImageDismissAxis? {
         guard isZoomed == false else { return nil }
         let horizontalSpeed = abs(velocity.x)
         let verticalSpeed = abs(velocity.y)
-        if horizontalSpeed > verticalSpeed * horizontalPagingDominance {
-            return isFirstImage && velocity.x > 0 ? .horizontalRight : nil
+        let horizontalTravel = abs(translation.x)
+        let verticalTravel = abs(translation.y)
+
+        // shouldBegin often samples near-zero velocity. Prefer translation so
+        // vertical swipe-to-dismiss still wins for animated images while the
+        // main thread is busy advancing GIF frames.
+        let horizontalDominant = horizontalTravel > verticalTravel * horizontalPagingDominance
+            || (horizontalTravel <= 0.5 && horizontalSpeed > verticalSpeed * horizontalPagingDominance)
+        if horizontalDominant {
+            let movingRight = translation.x > 0 || velocity.x > 0
+            return isFirstImage && movingRight ? .horizontalRight : nil
         }
-        return verticalSpeed > 0 ? .vertical : nil
+        if verticalTravel > 0 || verticalSpeed > 0 {
+            return .vertical
+        }
+        return nil
     }
 
     static func adjustedTranslation(
