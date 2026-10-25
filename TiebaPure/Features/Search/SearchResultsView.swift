@@ -46,11 +46,13 @@ struct SearchResultsView: View {
     @State private var searchText: String
     @State private var submittedKeyword: String
     @State private var results: [SearchResult] = []
+    @State private var forumResults: [Forum] = []
     @State private var page = 1
     @State private var hasMore = true
     @State private var isLoading = false
     @State private var didLoad = false
     @State private var errorMessage: String?
+    /// 2 = 全部帖子, 1 = 仅主题帖, 3 = 贴吧名称
     @State private var filterType = 2
     @State private var sortType = 5
     @State private var activeThread: SearchThreadRoute?
@@ -297,18 +299,27 @@ struct SearchResultsView: View {
 
                     Group {
                         if isLoading && didLoad == false {
-                            ReaderStateView.loading("正在搜索")
-                        } else if let errorMessage, results.isEmpty {
+                            ReaderStateView.loading(isForumFilter ? "正在搜索贴吧" : "正在搜索")
+                        } else if let errorMessage, (isForumFilter ? forumResults.isEmpty : results.isEmpty) {
                             ReaderStateView.error(message: errorMessage) {
                                 Task { await reload() }
                             }
-                        } else if results.isEmpty {
+                        } else if isForumFilter && forumResults.isEmpty {
+                            ReaderStateView.empty(
+                                title: "没有匹配的贴吧",
+                                message: "换个关键词试试，或去掉「吧」字再搜。",
+                                actionTitle: nil,
+                                action: nil
+                            )
+                        } else if isForumFilter == false && results.isEmpty {
                             ReaderStateView.empty(
                                 title: "没有结果",
                                 message: "可调整范围或排序后重试。",
                                 actionTitle: hasMore && didLoad ? "继续加载" : nil,
                                 action: hasMore && didLoad ? { Task { await loadMore() } } : nil
                             )
+                        } else if isForumFilter {
+                            forumSearchResultsList
                         } else {
                             LazyVStack(spacing: TiebaPureTheme.Spacing.sm) {
                                 ForEach(Array(results.enumerated()), id: \.element.id) { index, result in
@@ -473,6 +484,92 @@ struct SearchResultsView: View {
         }
     }
 
+    private var forumSearchResultsList: some View {
+        LazyVStack(spacing: 0) {
+            ForEach(Array(forumResults.enumerated()), id: \.element.id) { index, forum in
+                Button {
+                    RecentForumStore.shared.save(forum)
+                    openForum(forum)
+                } label: {
+                    HStack(spacing: TiebaPureTheme.Spacing.sm) {
+                        AvatarView(
+                            url: forum.avatarURL,
+                            title: forum.displayName,
+                            size: TiebaPureTheme.AvatarSize.medium
+                        )
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(forum.displayName)
+                                .font(.body.weight(.semibold))
+                                .foregroundStyle(.primary)
+                                .lineLimit(1)
+                            HStack(spacing: TiebaPureTheme.Spacing.sm) {
+                                if forum.memberCount > 0 {
+                                    Text("关注 \(forum.memberCount)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                if forum.threadCount > 0 {
+                                    Text("帖子 \(forum.threadCount)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.right")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, TiebaPureTheme.Spacing.md)
+                    .padding(.vertical, TiebaPureTheme.Spacing.sm)
+                    .frame(maxWidth: .infinity, minHeight: 56, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("贴吧：\(forum.displayName)")
+                .accessibilityIdentifier("search-forum-row-\(forum.id)")
+                .onAppear {
+                    guard PaginationPrefetchPolicy.shouldLoadMore(
+                        currentIndex: index,
+                        totalCount: forumResults.count
+                    ) else { return }
+                    Task { await loadMore() }
+                }
+
+                if index < forumResults.count - 1 {
+                    Divider()
+                        .padding(.leading, TiebaPureTheme.Spacing.md + 44)
+                }
+            }
+
+            if isLoading, didLoad {
+                ProgressView()
+                    .padding(TiebaPureTheme.Spacing.md)
+                    .accessibilityLabel("正在加载更多贴吧")
+            }
+
+            if hasMore, isLoading == false, didLoad {
+                Button {
+                    Task { await loadMore() }
+                } label: {
+                    Label("加载更多贴吧", systemImage: "arrow.down.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+                .minTouchTarget()
+                .padding(.horizontal, TiebaPureTheme.Spacing.md)
+                .padding(.vertical, TiebaPureTheme.Spacing.sm)
+            }
+        }
+        .background(TiebaPureTheme.ColorToken.readerSecondarySurface)
+        .clipShape(RoundedRectangle(cornerRadius: TiebaPureTheme.Radius.media, style: .continuous))
+        .padding(.horizontal, TiebaPureTheme.Spacing.md)
+        .padding(.top, SearchResultsControlsLayout.resultsTopPadding)
+    }
+
     private func openForum(_ forum: Forum) {
         if let openForumInParent {
             navigationSourceLifecycle.beginParentNavigation()
@@ -496,7 +593,9 @@ struct SearchResultsView: View {
             HStack(alignment: .center, spacing: TiebaPureTheme.Spacing.sm) {
                 filterPicker
                 Spacer(minLength: TiebaPureTheme.Spacing.sm)
-                sortMenu
+                if isForumFilter == false {
+                    sortMenu
+                }
             }
             .frame(
                 maxWidth: .infinity,
@@ -506,7 +605,9 @@ struct SearchResultsView: View {
             )
             VStack(alignment: .leading, spacing: TiebaPureTheme.Spacing.xs) {
                 filterPicker
-                sortMenu
+                if isForumFilter == false {
+                    sortMenu
+                }
             }
         }
         .padding(.horizontal, TiebaPureTheme.Spacing.md)
@@ -520,14 +621,26 @@ struct SearchResultsView: View {
             Picker("范围", selection: $filterType) {
                 Text("全部").tag(2)
                 Text("主题").tag(1)
+                if case .global = scope {
+                    Text("贴吧").tag(3)
+                }
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: 220)
+            .frame(maxWidth: isGlobalScope ? 280 : 220)
             .frame(height: SearchResultsControlsLayout.controlHeight, alignment: .center)
             .contentShape(Rectangle())
             .onChange(of: filterType) { _ in
                 Task { await reload() }
             }
+    }
+
+    private var isGlobalScope: Bool {
+        if case .global = scope { return true }
+        return false
+    }
+
+    private var isForumFilter: Bool {
+        filterType == 3
     }
 
     private var sortMenu: some View {
@@ -580,6 +693,7 @@ struct SearchResultsView: View {
         searchText = ""
         submittedKeyword = ""
         results = []
+        forumResults = []
         page = 1
         hasMore = true
         isLoading = false
@@ -601,7 +715,9 @@ struct SearchResultsView: View {
         page = 1
         hasMore = true
         errorMessage = nil
-        if results.isEmpty {
+        if isForumFilter {
+            if forumResults.isEmpty { didLoad = false }
+        } else if results.isEmpty {
             didLoad = false
         }
         await loadMore(generation: requestGeneration)
@@ -632,42 +748,65 @@ struct SearchResultsView: View {
         var continuation: LocallyFilteredPaginationDecision?
 
         do {
-            let task = Task { try await environment.api.searchThreads(
-                keyword: keyword,
-                page: requestedPage,
-                sortType: key.sortType,
-                filterType: key.filterType,
-                forumName: scope.forumName
-            ) }
-            loadTask = task
-            let pageResult = try await task.value
-            guard generation == requestGeneration,
-                  requestedSession == account?.sessionIdentity,
-                  key == currentRequestKey(page: requestedPage) else { return }
-            let visibleResults = pageResult.results
-                .filter(TiebaContentFilter.shouldKeep(searchResult:))
-            if requestedPage == 1 {
-                results = visibleResults
+            if isForumFilter {
+                let pageResult = try await environment.api.searchForums(
+                    keyword: keyword,
+                    page: requestedPage,
+                    pageSize: 20
+                )
+                guard generation == requestGeneration,
+                      requestedSession == account?.sessionIdentity,
+                      key == currentRequestKey(page: requestedPage) else { return }
+                if requestedPage == 1 {
+                    forumResults = pageResult.forums
+                } else {
+                    let known = Set(forumResults.map(\.id))
+                    forumResults.append(
+                        contentsOf: pageResult.forums.filter { known.contains($0.id) == false }
+                    )
+                }
+                results = []
+                hasMore = pageResult.hasMore
+                if hasMore {
+                    page = requestedPage + 1
+                }
             } else {
-                let known = Set(results.map(\.id))
-                results.append(contentsOf: visibleResults.filter { known.contains($0.id) == false })
+                let task = Task { try await environment.api.searchThreads(
+                    keyword: keyword,
+                    page: requestedPage,
+                    sortType: key.sortType,
+                    filterType: key.filterType,
+                    forumName: scope.forumName
+                ) }
+                loadTask = task
+                let pageResult = try await task.value
+                guard generation == requestGeneration,
+                      requestedSession == account?.sessionIdentity,
+                      key == currentRequestKey(page: requestedPage) else { return }
+                let visibleResults = pageResult.results
+                    .filter(TiebaContentFilter.shouldKeep(searchResult:))
+                if requestedPage == 1 {
+                    results = visibleResults
+                    forumResults = []
+                } else {
+                    let known = Set(results.map(\.id))
+                    results.append(contentsOf: visibleResults.filter { known.contains($0.id) == false })
+                }
+                hasMore = pageResult.hasMore
+                if let followingPage = TiebaPaginationPolicy.nextPage(
+                    requestedPage: requestedPage,
+                    responseCurrentPage: pageResult.currentPage
+                ) {
+                    page = followingPage
+                } else {
+                    hasMore = false
+                }
+                continuation = LocallyFilteredPaginationPolicy.decision(
+                    visibleItemCount: visibleResults.count,
+                    serverHasMore: hasMore,
+                    consecutiveHiddenPageCount: consecutiveHiddenPageCount
+                )
             }
-            // Search responses carry an explicit service-side continuation
-            // bit. A locally hidden page must not override it.
-            hasMore = pageResult.hasMore
-            if let followingPage = TiebaPaginationPolicy.nextPage(
-                requestedPage: requestedPage,
-                responseCurrentPage: pageResult.currentPage
-            ) {
-                page = followingPage
-            } else {
-                hasMore = false
-            }
-            continuation = LocallyFilteredPaginationPolicy.decision(
-                visibleItemCount: visibleResults.count,
-                serverHasMore: hasMore,
-                consecutiveHiddenPageCount: consecutiveHiddenPageCount
-            )
         } catch is CancellationError {
             guard generation == requestGeneration,
                   requestedSession == account?.sessionIdentity else { return }
