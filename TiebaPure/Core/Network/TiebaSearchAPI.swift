@@ -68,8 +68,8 @@ extension TiebaAPI {
 
     func searchForums(
         keyword: String,
-        page: Int = 1,
-        pageSize: Int = 20
+        page: Int,
+        pageSize: Int
     ) async throws -> ForumSearchResultsPage {
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else {
@@ -652,17 +652,21 @@ private struct SearchForumResponseDTO: Decodable {
                 memberCount = n
             } else if let n = try? container.decodeIfPresent(Int.self, forKey: .memberCount) {
                 memberCount = n
-            } else if let s = try? container.decodeIfPresent(String.self, forKey: .memberCount),
-                      let n = Int(s.filter(\.isNumber)) {
-                memberCount = n
+            } else if let s = try? container.decodeIfPresent(String.self, forKey: .memberCount) {
+                let digits = s.filter { $0.isNumber }
+                if let n = Int(digits) {
+                    memberCount = n
+                }
             }
             if let n = try? container.decodeIfPresent(Int.self, forKey: .postNumOri) {
                 threadCount = n
             } else if let n = try? container.decodeIfPresent(Int.self, forKey: .threadCount) {
                 threadCount = n
-            } else if let s = try? container.decodeIfPresent(String.self, forKey: .threadCount),
-                      let n = Int(s.filter(\.isNumber)) {
-                threadCount = n
+            } else if let s = try? container.decodeIfPresent(String.self, forKey: .threadCount) {
+                let digits = s.filter { $0.isNumber }
+                if let n = Int(digits) {
+                    threadCount = n
+                }
             }
         }
 
