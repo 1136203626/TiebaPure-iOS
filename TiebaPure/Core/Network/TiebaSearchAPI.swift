@@ -92,7 +92,7 @@ extension TiebaAPI {
 
         try TiebaResponseValidator.validate(
             code: response.errorCode,
-            message: response.errorMessage
+            message: response.errorMessage ?? ""
         )
 
         return ForumSearchResultsPage(
