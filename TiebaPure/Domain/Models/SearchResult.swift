@@ -54,3 +54,9 @@ struct SearchResult: Identifiable, Equatable, Sendable {
         )
     }
 }
+
+struct ForumSearchResultsPage: Equatable, Sendable {
+    var forums: [Forum]
+    var currentPage: Int
+    var hasMore: Bool
+}
