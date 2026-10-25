@@ -18,6 +18,11 @@ protocol TiebaAPIService {
         forumName: String?,
         pageSize: Int
     ) async throws -> SearchResultsPage
+    func searchForums(
+        keyword: String,
+        page: Int,
+        pageSize: Int
+    ) async throws -> ForumSearchResultsPage
     func resolveUser(named name: String) async throws -> UserSummary
     func threadPage(
         account: Account?,
@@ -137,6 +142,14 @@ extension TiebaAPIService {
             forumName: forumName,
             pageSize: pageSize
         )
+    }
+
+    func searchForums(
+        keyword: String,
+        page: Int = 1,
+        pageSize: Int = 20
+    ) async throws -> ForumSearchResultsPage {
+        try await searchForums(keyword: keyword, page: page, pageSize: pageSize)
     }
 
     func threadPage(

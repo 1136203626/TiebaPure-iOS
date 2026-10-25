@@ -220,6 +220,17 @@ struct FixtureTiebaAPI: TiebaAPIService {
         return SearchResultsPage(results: page == 1 ? [result] : [], currentPage: page, hasMore: false)
     }
 
+    func searchForums(
+        keyword: String,
+        page: Int,
+        pageSize: Int
+    ) async throws -> ForumSearchResultsPage {
+        _ = keyword
+        _ = page
+        _ = pageSize
+        return ForumSearchResultsPage(forums: [], currentPage: 1, hasMore: false)
+    }
+
     func resolveUser(named name: String) async throws -> UserSummary {
         try await prepare()
         guard TiebaUserName.normalized(name) == TiebaUserName.normalized(Self.replyTarget.displayNameResolved) else {

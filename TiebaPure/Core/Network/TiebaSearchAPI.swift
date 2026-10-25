@@ -66,6 +66,44 @@ extension TiebaAPI {
         )
     }
 
+    func searchForums(
+        keyword: String,
+        page: Int = 1,
+        pageSize: Int = 20
+    ) async throws -> ForumSearchResultsPage {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else {
+            return ForumSearchResultsPage(forums: [], currentPage: 1, hasMore: false)
+        }
+
+        let response = try await client.getJSON(
+            .searchForum,
+            queryItems: [
+                .init(name: "word", value: trimmed),
+                .init(name: "pn", value: "\(page)"),
+                .init(name: "rn", value: "\(pageSize)")
+            ],
+            headers: [
+                "User-Agent": "tieba/12.52.1.0 skin/default",
+                "Referer": "https://tieba.baidu.com/mo/q/hybrid/search?keyword=\(trimmed.tiebaRefererQueryEscaped)"
+            ],
+            as: SearchForumResponseDTO.self
+        )
+
+        try TiebaResponseValidator.validate(
+            code: response.errorCode,
+            message: response.errorMessage
+        )
+
+        return ForumSearchResultsPage(
+            forums: response.data.forums,
+            currentPage: response.data.currentPage,
+            hasMore: response.data.hasMore
+        )
+    }
+
+
+
     func resolveUser(named name: String) async throws -> UserSummary {
         let reference = TiebaUserName.referenceText(name)
         let normalizedReference = TiebaUserName.normalized(reference)
@@ -527,5 +565,122 @@ private extension KeyedDecodingContainer {
             return nil
         }
         return Date(timeIntervalSince1970: seconds)
+    }
+}
+
+
+private struct SearchForumResponseDTO: Decodable {
+    var errorCode: Int
+    var errorMessage: String?
+    var data: DataDTO
+
+    enum CodingKeys: String, CodingKey {
+        case errorCode = "no"
+        case errorMessage = "error"
+        case data
+    }
+
+    struct DataDTO: Decodable {
+        var pn: Int?
+        var hasMoreRaw: Int?
+        var exactMatch: ForumItemDTO?
+        var fuzzyMatch: [ForumItemDTO]?
+
+        enum CodingKeys: String, CodingKey {
+            case pn
+            case hasMoreRaw = "has_more"
+            case exactMatch
+            case fuzzyMatch
+        }
+
+        var currentPage: Int { max(pn ?? 1, 1) }
+        var hasMore: Bool { (hasMoreRaw ?? 0) == 1 }
+
+        var forums: [Forum] {
+            var seen = Set<Int64>()
+            var result: [Forum] = []
+            if let exactMatch {
+                let forum = exactMatch.forum
+                if seen.insert(forum.id).inserted {
+                    result.append(forum)
+                }
+            }
+            for item in fuzzyMatch ?? [] {
+                let forum = item.forum
+                if seen.insert(forum.id).inserted {
+                    result.append(forum)
+                }
+            }
+            return result
+        }
+    }
+
+    struct ForumItemDTO: Decodable {
+        var forumID: Int64?
+        var forumName: String?
+        var forumNameShow: String?
+        var avatar: String?
+        var memberCount: Int?
+        var threadCount: Int?
+        var postNumOri: Int?
+        var concernNumOri: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case forumID = "forum_id"
+            case forumName = "forum_name"
+            case forumNameShow = "forum_name_show"
+            case avatar
+            case memberCount = "concern_num"
+            case threadCount = "post_num"
+            case postNumOri = "post_num_ori"
+            case concernNumOri = "concern_num_ori"
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let intID = try? container.decodeIfPresent(Int64.self, forKey: .forumID) {
+                forumID = intID
+            } else if let stringID = try? container.decodeIfPresent(String.self, forKey: .forumID) {
+                forumID = Int64(stringID)
+            } else {
+                forumID = nil
+            }
+            forumName = try container.decodeIfPresent(String.self, forKey: .forumName)
+            forumNameShow = try container.decodeIfPresent(String.self, forKey: .forumNameShow)
+            avatar = try container.decodeIfPresent(String.self, forKey: .avatar)
+            if let n = try? container.decodeIfPresent(Int.self, forKey: .concernNumOri) {
+                memberCount = n
+            } else if let n = try? container.decodeIfPresent(Int.self, forKey: .memberCount) {
+                memberCount = n
+            } else if let s = try? container.decodeIfPresent(String.self, forKey: .memberCount),
+                      let n = Int(s.filter(\.isNumber)) {
+                memberCount = n
+            }
+            if let n = try? container.decodeIfPresent(Int.self, forKey: .postNumOri) {
+                threadCount = n
+            } else if let n = try? container.decodeIfPresent(Int.self, forKey: .threadCount) {
+                threadCount = n
+            } else if let s = try? container.decodeIfPresent(String.self, forKey: .threadCount),
+                      let n = Int(s.filter(\.isNumber)) {
+                threadCount = n
+            }
+        }
+
+        var forum: Forum {
+            let name = (forumName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let show = (forumNameShow ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedName = name.isEmpty == false ? name : show
+            let display = show.isEmpty == false
+                ? (show.hasSuffix("吧") ? show : "\(show)吧")
+                : (resolvedName.hasSuffix("吧") ? resolvedName : "\(resolvedName)吧")
+            return Forum(
+                id: forumID ?? 0,
+                name: resolvedName,
+                displayName: display,
+                avatarURL: TiebaURL.make(avatar),
+                memberCount: memberCount ?? 0,
+                threadCount: threadCount ?? 0
+            )
+        }
     }
 }
