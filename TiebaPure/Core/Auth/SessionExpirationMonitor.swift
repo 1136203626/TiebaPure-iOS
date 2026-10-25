@@ -93,6 +93,18 @@ struct SessionMonitoringTiebaAPI: TiebaAPIService {
         )
     }
 
+    func searchForums(
+        keyword: String,
+        page: Int,
+        pageSize: Int
+    ) async throws -> ForumSearchResultsPage {
+        try await base.searchForums(
+            keyword: keyword,
+            page: page,
+            pageSize: pageSize
+        )
+    }
+
     func resolveUser(named name: String) async throws -> UserSummary {
         try await base.resolveUser(named: name)
     }
