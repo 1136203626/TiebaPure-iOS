@@ -617,21 +617,34 @@ struct SearchResultsView: View {
         .accessibilityIdentifier("search-result-controls")
     }
 
+    @ViewBuilder
     private var filterPicker: some View {
+        if isGlobalScope {
             Picker("范围", selection: $filterType) {
                 Text("全部").tag(2)
                 Text("主题").tag(1)
-                if case .global = scope {
-                    Text("贴吧").tag(3)
-                }
+                Text("贴吧").tag(3)
             }
             .pickerStyle(.segmented)
-            .frame(maxWidth: isGlobalScope ? 280 : 220)
+            .frame(maxWidth: 280)
             .frame(height: SearchResultsControlsLayout.controlHeight, alignment: .center)
             .contentShape(Rectangle())
             .onChange(of: filterType) { _ in
                 Task { await reload() }
             }
+        } else {
+            Picker("范围", selection: $filterType) {
+                Text("全部").tag(2)
+                Text("主题").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 220)
+            .frame(height: SearchResultsControlsLayout.controlHeight, alignment: .center)
+            .contentShape(Rectangle())
+            .onChange(of: filterType) { _ in
+                Task { await reload() }
+            }
+        }
     }
 
     private var isGlobalScope: Bool {
