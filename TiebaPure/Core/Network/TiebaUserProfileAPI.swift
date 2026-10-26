@@ -261,6 +261,15 @@ extension TiebaAPI {
         kind: UserPostListKind = .threads
     ) async throws -> UserThreadsPage {
         guard userID > 0 else { throw UserProfileAPIError.missingUserIdentifier }
+
+        // 自己的回帖：官方 App「我的帖子 → 回复」走 myThread，protobuf userpost 对回帖常返回 hide_post
+        if kind == .replies,
+           let account,
+           let accountUID = Int64(account.uid),
+           accountUID == userID {
+            return try await myThreadList(account: account, page: page, type: 2)
+        }
+
         let request = try UserProfileRequestFactory.threadsRequest(
             account: account,
             userID: userID,
@@ -285,6 +294,81 @@ extension TiebaAPI {
             message: response.error.userMsg.isEmpty ? response.error.errorMsg : response.error.userMsg
         )
         return UserProfileMapper.threadsPage(from: response, page: page)
+    }
+
+    /// 官方「我的帖子」：type 1 = 主贴，type 2 = 回复
+    private func myThreadList(
+        account: Account,
+        page: Int,
+        type: Int
+    ) async throws -> UserThreadsPage {
+        let requestedPage = try TiebaRequestValuePolicy.unsignedPage(page)
+        var portrait = account.portrait.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let qIndex = portrait.firstIndex(of: "?") {
+            portrait = String(portrait[..<qIndex])
+        }
+        guard portrait.isEmpty == false else {
+            throw UserProfileAPIError.missingPortrait
+        }
+
+        var fields: [String: String] = [
+            "pn": "\(requestedPage)",
+            "rn": "20",
+            "portrait": portrait,
+            "type": "\(type)",
+            "subapp_type": "pc",
+            "_client_type": "20"
+        ]
+        // PC 端签名（小写 MD5）
+        let sign = TiebaFormSigner.sign(
+            fields: fields,
+            secret: "36770b1f34c9bbf2e7d1a99d2b82fa9e"
+        ).lowercased()
+        fields["sign"] = sign
+
+        let query = fields
+            .map { key, value in
+                "\(key.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=?+#"))) ?? key)=\(value.addingPercentEncoding(withAllowedCharacters: CharacterSet.urlQueryAllowed.subtracting(CharacterSet(charactersIn: "&=?+#"))) ?? value)"
+            }
+            .sorted()
+            .joined(separator: "&")
+
+        guard let url = URL(string: "https://tieba.baidu.com/c/u/feed/myThread?\(query)") else {
+            throw TiebaHTTPError.invalidURL
+        }
+
+        var urlRequest = URLRequest(url: url)
+        urlRequest.httpMethod = "GET"
+        urlRequest.setValue(
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+            forHTTPHeaderField: "User-Agent"
+        )
+        urlRequest.setValue(account.minimalCookieHeader, forHTTPHeaderField: "Cookie")
+        urlRequest.setValue("https://tieba.baidu.com/", forHTTPHeaderField: "Referer")
+
+        let (data, urlResponse) = try await client.session.data(for: urlRequest)
+        if let http = urlResponse as? HTTPURLResponse,
+           (200..<300).contains(http.statusCode) == false {
+            throw TiebaHTTPError.badStatus(code: http.statusCode, body: data)
+        }
+
+        let decoded = try JSONDecoder().decode(MyThreadListResponseDTO.self, from: data)
+        let code = decoded.resolvedErrorCode
+        if code != 0 {
+            try TiebaResponseValidator.validate(
+                code: code,
+                message: decoded.errorMsg ?? "加载我的回帖失败"
+            )
+        }
+
+        let items = decoded.data?.list ?? []
+        let threads = items.compactMap(\.asThreadSummary)
+        return UserThreadsPage(
+            threads: threads,
+            currentPage: requestedPage,
+            hasMore: items.count >= 20,
+            visibility: .visible
+        )
     }
 
     func updateOwnProfile(account: Account, request: UserProfileEditRequest) async throws {
@@ -464,5 +548,252 @@ private func strictUserProfileMutationInteger(_ value: Any) throws -> Int {
         return integer
     default:
         throw UserProfileMutationError.outcomeUnknown
+    }
+}
+
+
+// MARK: - 我的帖子 myThread JSON
+
+private struct MyThreadListResponseDTO: Decodable {
+    var errorCode: FlexibleJSONValue?
+    var errorCodeSnake: FlexibleJSONValue?
+    var errorMsg: String?
+    var data: MyThreadListDataDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case errorCode = "error_code"
+        case errorCodeSnake = "errno"
+        case errorMsg = "error_msg"
+        case data
+    }
+
+    var resolvedErrorCode: Int {
+        errorCode?.intValue ?? errorCodeSnake?.intValue ?? 0
+    }
+}
+
+private struct MyThreadListDataDTO: Decodable {
+    var list: [MyThreadListItemDTO]?
+}
+
+private struct MyThreadListItemDTO: Decodable {
+    var threadInfo: MyThreadInfoDTO?
+    var postInfo: MyPostInfoDTO?
+    var type: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case threadInfo = "thread_info"
+        case postInfo = "post_info"
+        case type
+    }
+
+    var asThreadSummary: ThreadSummary? {
+        guard let threadInfo else { return nil }
+        let tid = threadInfo.threadID ?? 0
+        guard tid > 0 else { return nil }
+
+        let replyText = postInfo?.plainText ?? ""
+        let threadTitle = (threadInfo.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle: String
+        if replyText.isEmpty == false {
+            displayTitle = replyText.hasPrefix("回复") ? replyText : "回复：\(replyText)"
+        } else if threadTitle.isEmpty == false {
+            displayTitle = threadTitle.hasPrefix("回复") ? threadTitle : "回复：\(threadTitle)"
+        } else {
+            displayTitle = "回帖"
+        }
+
+        let originLine = threadTitle.isEmpty ? nil : "原帖：\(threadTitle.replacingOccurrences(of: "回复：", with: ""))"
+        var blocks: [ContentBlock] = [.text(displayTitle)]
+        if let originLine, originLine != displayTitle {
+            blocks.append(.text(originLine))
+        }
+
+        let author = UserSummary(
+            id: postInfo?.author?.id ?? threadInfo.author?.id ?? 0,
+            name: postInfo?.author?.name ?? threadInfo.author?.name ?? "",
+            displayName: postInfo?.author?.nameShow ?? threadInfo.author?.nameShow ?? "",
+            portrait: postInfo?.author?.portrait ?? threadInfo.author?.portrait ?? ""
+        )
+
+        let created: Date?
+        if let t = postInfo?.time ?? threadInfo.createTime, t > 0 {
+            created = Date(timeIntervalSince1970: TimeInterval(t))
+        } else {
+            created = nil
+        }
+
+        return ThreadSummary(
+            id: tid,
+            forumID: threadInfo.forumID.flatMap { $0 > 0 ? $0 : nil },
+            title: displayTitle,
+            author: author,
+            forumName: threadInfo.forumName ?? threadInfo.forumInfo?.name,
+            replyCount: threadInfo.replyNum ?? 0,
+            viewCount: threadInfo.viewNum ?? 0,
+            likeCount: threadInfo.agreeNum ?? 0,
+            firstPostID: postInfo?.id,
+            createdAt: created,
+            blocks: blocks
+        )
+    }
+}
+
+private struct MyThreadInfoDTO: Decodable {
+    var threadID: Int64?
+    var forumID: Int64?
+    var forumName: String?
+    var title: String?
+    var replyNum: Int?
+    var viewNum: Int?
+    var agreeNum: Int?
+    var createTime: Int64?
+    var author: MyThreadUserDTO?
+    var forumInfo: MyThreadForumDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case threadID = "thread_id"
+        case forumID = "forum_id"
+        case forumName = "forum_name"
+        case title
+        case replyNum = "reply_num"
+        case viewNum = "view_num"
+        case agreeNum = "agree_num"
+        case createTime = "create_time"
+        case author
+        case forumInfo = "forum_info"
+        // alternate keys used by some builds
+        case id
+        case tid
+        case fid
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        threadID = Self.decodeInt64(c, .threadID) ?? Self.decodeInt64(c, .tid) ?? Self.decodeInt64(c, .id)
+        forumID = Self.decodeInt64(c, .forumID) ?? Self.decodeInt64(c, .fid)
+        forumName = try c.decodeIfPresent(String.self, forKey: .forumName)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        replyNum = Self.decodeInt(c, .replyNum)
+        viewNum = Self.decodeInt(c, .viewNum)
+        agreeNum = Self.decodeInt(c, .agreeNum)
+        createTime = Self.decodeInt64(c, .createTime)
+        author = try c.decodeIfPresent(MyThreadUserDTO.self, forKey: .author)
+        forumInfo = try c.decodeIfPresent(MyThreadForumDTO.self, forKey: .forumInfo)
+    }
+
+    private static func decodeInt64(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int64? {
+        if let v = try? c.decodeIfPresent(Int64.self, forKey: key) { return v }
+        if let s = try? c.decodeIfPresent(String.self, forKey: key), let v = Int64(s) { return v }
+        if let v = try? c.decodeIfPresent(Int.self, forKey: key) { return Int64(v) }
+        return nil
+    }
+
+    private static func decodeInt(_ c: KeyedDecodingContainer<CodingKeys>, _ key: CodingKeys) -> Int? {
+        if let v = try? c.decodeIfPresent(Int.self, forKey: key) { return v }
+        if let s = try? c.decodeIfPresent(String.self, forKey: key), let v = Int(s) { return v }
+        return nil
+    }
+}
+
+private struct MyThreadForumDTO: Decodable {
+    var name: String?
+    var id: Int64?
+}
+
+private struct MyPostInfoDTO: Decodable {
+    var id: UInt64?
+    var time: Int64?
+    var content: [MyPostContentDTO]?
+    var author: MyThreadUserDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case time
+        case content
+        case author
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decodeIfPresent(UInt64.self, forKey: .id) {
+            id = v
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .id), let v = UInt64(s) {
+            id = v
+        } else {
+            id = nil
+        }
+        if let v = try? c.decodeIfPresent(Int64.self, forKey: .time) {
+            time = v
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .time), let v = Int64(s) {
+            time = v
+        } else {
+            time = nil
+        }
+        content = try c.decodeIfPresent([MyPostContentDTO].self, forKey: .content)
+        author = try c.decodeIfPresent(MyThreadUserDTO.self, forKey: .author)
+    }
+
+    var plainText: String {
+        (content ?? [])
+            .compactMap { $0.text }
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+private struct MyPostContentDTO: Decodable {
+    var text: String?
+    var type: Int?
+}
+
+private struct MyThreadUserDTO: Decodable {
+    var id: Int64?
+    var name: String?
+    var nameShow: String?
+    var portrait: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case nameShow = "name_show"
+        case portrait
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decodeIfPresent(Int64.self, forKey: .id) {
+            id = v
+        } else if let s = try? c.decodeIfPresent(String.self, forKey: .id), let v = Int64(s) {
+            id = v
+        } else {
+            id = nil
+        }
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        nameShow = try c.decodeIfPresent(String.self, forKey: .nameShow)
+        portrait = try c.decodeIfPresent(String.self, forKey: .portrait)
+    }
+}
+
+private enum FlexibleJSONValue: Decodable {
+    case int(Int)
+    case string(String)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let v = try? c.decode(Int.self) {
+            self = .int(v)
+        } else if let v = try? c.decode(String.self) {
+            self = .string(v)
+        } else {
+            self = .int(0)
+        }
+    }
+
+    var intValue: Int? {
+        switch self {
+        case .int(let v): return v
+        case .string(let s): return Int(s)
+        }
     }
 }
