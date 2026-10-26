@@ -704,7 +704,13 @@ struct FixtureTiebaAPI: TiebaAPIService {
         }
     }
 
-    func userThreads(account: Account?, userID: Int64, page: Int) async throws -> UserThreadsPage {
+    func userThreads(
+        account: Account?,
+        userID: Int64,
+        page: Int,
+        kind: UserPostListKind
+    ) async throws -> UserThreadsPage {
+        _ = kind
         try await prepare(page: page)
         if scenario == .privateProfile {
             return UserThreadsPage(

@@ -42,7 +42,12 @@ protocol TiebaAPIService {
         subpostID: UInt64
     ) async throws -> [Subpost]
     func userProfile(account: Account?, user: UserSummary) async throws -> UserProfile
-    func userThreads(account: Account?, userID: Int64, page: Int) async throws -> UserThreadsPage
+    func userThreads(
+        account: Account?,
+        userID: Int64,
+        page: Int,
+        kind: UserPostListKind
+    ) async throws -> UserThreadsPage
     func updateOwnProfile(account: Account, request: UserProfileEditRequest) async throws
     func deleteOwnThread(account: Account, target: OwnThreadDeletionTarget) async throws
     func setUserFollowed(account: Account, user: UserSummary, followed: Bool) async throws
@@ -77,6 +82,15 @@ protocol TiebaAPIService {
 }
 
 extension TiebaAPIService {
+
+    func userThreads(
+        account: Account?,
+        userID: Int64,
+        page: Int
+    ) async throws -> UserThreadsPage {
+        try await userThreads(account: account, userID: userID, page: page, kind: .threads)
+    }
+
     /// Same shape as the other optional write operations: services that do not
     /// implement check-in (test doubles, offline stubs) reject it rather than
     /// having to carry a stub.

@@ -50,13 +50,14 @@ enum UserProfileRequestFactory {
         account: Account?,
         userID: Int64,
         page: Int,
+        kind: UserPostListKind = .threads,
         requestBuilder: TiebaRequestBuilder
     ) throws -> Tiebapure_Profile_UserThreadsRequest {
         let requestedPage = try TiebaRequestValuePolicy.unsignedPage(page)
         var data = Tiebapure_Profile_UserThreadsRequestData()
         data.uid = userID
         data.rn = 20
-        data.isThread = 1
+        data.isThread = kind.isThreadFlag
         data.needContent = 1
         data.pn = requestedPage
         data.common = requestBuilder.common(account: account)
@@ -244,12 +245,18 @@ extension TiebaAPI {
         )
     }
 
-    func userThreads(account: Account?, userID: Int64, page: Int) async throws -> UserThreadsPage {
+    func userThreads(
+        account: Account?,
+        userID: Int64,
+        page: Int,
+        kind: UserPostListKind = .threads
+    ) async throws -> UserThreadsPage {
         guard userID > 0 else { throw UserProfileAPIError.missingUserIdentifier }
         let request = try UserProfileRequestFactory.threadsRequest(
             account: account,
             userID: userID,
             page: page,
+            kind: kind,
             requestBuilder: requestBuilder
         )
         let multipart = try requestBuilder.multipart(
