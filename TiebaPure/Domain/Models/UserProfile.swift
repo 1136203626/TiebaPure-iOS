@@ -239,3 +239,44 @@ enum UserProfilePrivacyPolicy {
         return .privateContent
     }
 }
+
+enum UserPostListKind: String, Equatable, Sendable, CaseIterable {
+    case threads
+    case replies
+
+    /// Baidu userpost `is_thread`: 1 = 主题帖, 0 = 回帖
+    var isThreadFlag: UInt32 {
+        switch self {
+        case .threads: return 1
+        case .replies: return 0
+        }
+    }
+
+    var navigationTitle: String {
+        switch self {
+        case .threads: return "我的发帖"
+        case .replies: return "我的回帖"
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .threads: return "还没有发过帖"
+        case .replies: return "还没有回过帖"
+        }
+    }
+
+    var emptyMessage: String {
+        switch self {
+        case .threads: return "你在贴吧发布的主题会出现在这里。"
+        case .replies: return "你在贴吧里的回复会出现在这里。"
+        }
+    }
+
+    var loadingTitle: String {
+        switch self {
+        case .threads: return "正在加载发帖"
+        case .replies: return "正在加载回帖"
+        }
+    }
+}
