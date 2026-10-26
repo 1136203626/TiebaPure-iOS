@@ -77,11 +77,35 @@ struct MeView: View {
                         } label: {
                             Label("关注的吧", systemImage: "star")
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("关注的吧")
                         .accessibilityHint("打开已关注的贴吧列表")
+
+                        Button {
+                            navigationPath.append(.myPosts(.threads))
+                        } label: {
+                            Label("我的发帖", systemImage: "square.and.pencil")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("我的发帖")
+                        .accessibilityHint("查看当前账号发布的主题帖")
+                        .accessibilityIdentifier("me-my-posts-entry")
+
+                        Button {
+                            navigationPath.append(.myPosts(.replies))
+                        } label: {
+                            Label("我的回帖", systemImage: "bubble.left")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("我的回帖")
+                        .accessibilityHint("查看当前账号回复过的帖子")
+                        .accessibilityIdentifier("me-my-replies-entry")
                     }
                 } else {
                     Section("账号") {
@@ -227,6 +251,14 @@ struct MeView: View {
             if let account {
                 ForumListView(account: account, openForumInParent: openForum)
             }
+        case let .myPosts(kind):
+            if let account {
+                MyPostsView(
+                    account: account,
+                    kind: kind,
+                    openThreadInParent: openThread
+                )
+            }
         case .followedUsers:
             if let account {
                 FollowedUsersView(account: account, openUserInParent: { user in
@@ -307,6 +339,7 @@ enum MeNavigationRoute: Hashable {
     case messages
     case followedForums
     case followedUsers
+    case myPosts(UserPostListKind)
     case threadFavorites
     case browsingHistory
     case settings
