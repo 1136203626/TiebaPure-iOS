@@ -78,14 +78,26 @@ enum UserProfileMapper {
                 deletionTargetsByThreadID[thread.id] = deletionTarget
             }
         }
+        // 回帖列表的响应结构与主题列表不完全相同：field 2 不一定是 hide_post。
+        // 自己看自己的回帖时，只要有可解析条目就视为可见；仅在无条目且 hide_post!=0 时判为隐藏。
+        let markedHidden = response.data.hidePost != 0
+        let visibility: UserContentVisibility = {
+            if threads.isEmpty == false {
+                return .visible
+            }
+            if markedHidden {
+                return .privateContent
+            }
+            return .visible
+        }()
         return UserThreadsPage(
             threads: threads,
             currentPage: page,
             // A page that only contains blocked entries is still a real
             // server page; keep pagination alive so later visible entries
             // remain reachable.
-            hasMore: response.data.hidePost == 0 && rawItems.isEmpty == false,
-            visibility: response.data.hidePost == 0 ? .visible : .privateContent,
+            hasMore: visibility == .visible && rawItems.isEmpty == false,
+            visibility: visibility,
             deletionTargetsByThreadID: deletionTargetsByThreadID
         )
     }
