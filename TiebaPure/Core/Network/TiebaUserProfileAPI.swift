@@ -57,15 +57,24 @@ enum UserProfileRequestFactory {
         var data = Tiebapure_Profile_UserThreadsRequestData()
         data.uid = userID
         data.rn = 20
-        data.isThread = kind.isThreadFlag
         data.needContent = 1
         data.pn = requestedPage
         data.common = requestBuilder.common(account: account)
-        data.scrW = Int32(clamping: requestBuilder.screenWidth)
-        data.scrH = Int32(clamping: requestBuilder.screenHeight)
-        data.scrDip = requestBuilder.screenScale
-        data.qType = 1
-        data.isViewCard = 1
+
+        switch kind {
+        case .threads:
+            // 主题列表：与官方 userpost is_thread=1 对齐
+            data.isThread = 1
+            data.scrW = Int32(clamping: requestBuilder.screenWidth)
+            data.scrH = Int32(clamping: requestBuilder.screenHeight)
+            data.scrDip = requestBuilder.screenScale
+            data.qType = 1
+            data.isViewCard = 1
+        case .replies:
+            // 回帖列表：官方请求不带 is_thread / is_view_card / 屏幕参数
+            // is_thread 默认为 0；多带字段会导致服务端直接返回空列表
+            break
+        }
 
         var request = Tiebapure_Profile_UserThreadsRequest()
         request.data = data
