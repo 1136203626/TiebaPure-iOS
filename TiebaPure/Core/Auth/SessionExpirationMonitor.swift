@@ -160,10 +160,11 @@ struct SessionMonitoringTiebaAPI: TiebaAPIService {
     func userThreads(
         account: Account?,
         userID: Int64,
-        page: Int
+        page: Int,
+        kind: UserPostListKind
     ) async throws -> UserThreadsPage {
         try await monitored(account: account) {
-            try await base.userThreads(account: account, userID: userID, page: page)
+            try await base.userThreads(account: account, userID: userID, page: page, kind: kind)
         }
     }
 
