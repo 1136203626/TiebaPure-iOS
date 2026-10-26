@@ -16,6 +16,7 @@ struct MyPostsView: View {
     @State private var errorMessage: String?
     @State private var requestGeneration = 0
     @State private var loadTask: Task<UserThreadsPage, Error>?
+    @State private var visibility: UserContentVisibility = .visible
 
     var body: some View {
         Group {
@@ -25,6 +26,11 @@ struct MyPostsView: View {
                 ReaderStateView.error(message: errorMessage) {
                     Task { await reload() }
                 }
+            } else if visibility != .visible {
+                ReaderStateView.empty(
+                    title: "内容不可见",
+                    message: "对方设置了不公开回帖/发帖，或当前账号无权查看。"
+                )
             } else if threads.isEmpty {
                 ReaderStateView.empty(
                     title: kind.emptyTitle,
@@ -144,6 +150,7 @@ struct MyPostsView: View {
             guard generation == requestGeneration,
                   requestedSession == account.sessionIdentity else { return }
 
+            visibility = pageResult.visibility
             let visible = pageResult.threads.filter(TiebaContentFilter.shouldKeep(thread:))
             if requestedPage == 1 {
                 threads = visible
