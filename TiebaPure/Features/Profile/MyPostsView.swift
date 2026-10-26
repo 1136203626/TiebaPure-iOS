@@ -41,7 +41,7 @@ struct MyPostsView: View {
                                     openThreadInParent(
                                         ReaderSplitThreadRoute(
                                             threadID: thread.id,
-                                            forumID: thread.forumID > 0 ? thread.forumID : nil
+                                            forumID: (thread.forumID ?? 0) > 0 ? thread.forumID : nil
                                         )
                                     )
                                 }
