@@ -26,17 +26,7 @@ struct MyPostsView: View {
                 ReaderStateView.error(message: errorMessage) {
                     Task { await reload() }
                 }
-            } else if visibility != .visible {
-                ReaderStateView.empty(
-                    title: "内容不可见",
-                    message: "对方设置了不公开回帖/发帖，或当前账号无权查看。"
-                )
-            } else if threads.isEmpty {
-                ReaderStateView.empty(
-                    title: kind.emptyTitle,
-                    message: kind.emptyMessage
-                )
-            } else {
+            } else if threads.isEmpty == false {
                 ScrollView {
                     LazyVStack(spacing: TiebaPureTheme.Spacing.sm) {
                         ForEach(Array(threads.enumerated()), id: \.element.id) { index, thread in
@@ -47,7 +37,8 @@ struct MyPostsView: View {
                                     openThreadInParent(
                                         ReaderSplitThreadRoute(
                                             threadID: thread.id,
-                                            forumID: (thread.forumID ?? 0) > 0 ? thread.forumID : nil
+                                            forumID: (thread.forumID ?? 0) > 0 ? thread.forumID : nil,
+                                            initialPostID: thread.firstPostID
                                         )
                                     )
                                 }
@@ -91,6 +82,11 @@ struct MyPostsView: View {
                     .padding(.horizontal, TiebaPureTheme.Spacing.sm)
                     .padding(.vertical, TiebaPureTheme.Spacing.sm)
                 }
+            } else {
+                ReaderStateView.empty(
+                    title: kind.emptyTitle,
+                    message: kind.emptyMessage
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -158,7 +154,7 @@ struct MyPostsView: View {
                 let known = Set(threads.map(\.id))
                 threads.append(contentsOf: visible.filter { known.contains($0.id) == false })
             }
-            hasMore = pageResult.visibility == .visible && pageResult.hasMore
+            hasMore = pageResult.hasMore
             if hasMore {
                 page = requestedPage + 1
             }
