@@ -234,6 +234,11 @@ struct UserProfileView: View {
             isLoadingThreads = false
         }
         .accessibilityIdentifier("user-profile-screen")
+        .navigationDestination(isPresented: $showsPrivateChat) {
+            if let account, (profile?.isCurrentUser ?? false) == false {
+                PrivateChatView(account: account, peer: profile?.user ?? user)
+            }
+        }
         .fullScreenInteractiveNavigationPop()
     }
 
@@ -1329,8 +1334,25 @@ private struct UserProfileHeader: View {
         if let onEditProfile {
             editProfileButton(action: onEditProfile)
         } else if profile.isCurrentUser == false {
-            followButton
+            VStack(spacing: TiebaPureTheme.Spacing.xs) {
+                followButton
+                privateMessageButton
+            }
         }
+    }
+
+    private var privateMessageButton: some View {
+        Button {
+            showsPrivateChat = true
+        } label: {
+            Label("发私信", systemImage: "envelope")
+                .frame(maxWidth: .infinity, minHeight: 36)
+        }
+        .buttonStyle(.bordered)
+        .disabled(account == nil)
+        .accessibilityLabel("发私信")
+        .accessibilityHint("与该用户私信聊天")
+        .accessibilityIdentifier("user-profile-private-message")
     }
 
     private var profileName: some View {
