@@ -18,8 +18,6 @@ struct MessagesView: View {
     @State private var loadTask: Task<MessagesPage, Error>?
     @State private var activeMessage: MessageItem?
     @State private var navigationSourceLifecycle = NavigationSourceLifecycleState()
-    @State private var privateConversations: [PrivateConversation] = []
-    @State private var activePrivateChat: PrivateConversation?
 
     init(
         account: Account?,
@@ -52,14 +50,6 @@ struct MessagesView: View {
                 .interactiveNavigationPopStateSync {
                     self.activeMessage = nil
                 }
-            }
-        }
-        .navigationDestination(isPresented: privateChatIsActive) {
-            if let account, let activePrivateChat {
-                PrivateChatView(account: account, peer: activePrivateChat.peer)
-                    .interactiveNavigationPopStateSync {
-                        self.activePrivateChat = nil
-                    }
             }
         }
         .task {
@@ -96,10 +86,9 @@ struct MessagesView: View {
         Picker("消息类型", selection: $kind) {
             Text("回复我的").tag(MessageKind.reply)
             Text("@我的").tag(MessageKind.at)
-            Text("私信").tag(MessageKind.privateMessage)
         }
         .pickerStyle(.segmented)
-        .frame(maxWidth: 420)
+        .frame(maxWidth: 320)
         .frame(minHeight: 44)
         .padding(.horizontal, TiebaPureTheme.Spacing.md)
         .padding(.vertical, TiebaPureTheme.Spacing.xs)
@@ -112,19 +101,19 @@ struct MessagesView: View {
             ReaderStateView(
                 kind: .empty,
                 title: "登录后查看消息",
-                message: "登录后可以在这里查看回复我的、@我的和私信。",
+                message: "登录后可以在这里查看回复我的和@我的消息。",
                 systemImage: "person.crop.circle.badge.exclamationmark"
             )
             .accessibilityIdentifier("messages-login-prompt")
         } else if isLoading, didLoad == false {
             ReaderStateView.loading("正在加载消息")
-        } else if let errorMessage, isMessageListEmpty {
+        } else if let errorMessage, items.isEmpty {
             ReaderStateScrollView(refresh: { await reload() }) {
                 ReaderStateView.error(message: errorMessage) {
                     Task { await reload() }
                 }
             }
-        } else if isMessageListEmpty {
+        } else if items.isEmpty {
             ReaderStateScrollView(refresh: { await reload() }) {
                 ReaderStateView.empty(
                     title: emptyTitle,
@@ -141,22 +130,6 @@ struct MessagesView: View {
     private var messageList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                if kind == .privateMessage {
-                    ForEach(Array(privateConversations.enumerated()), id: \.element.id) { index, conversation in
-                        ReaderCard(action: { activePrivateChat = conversation }) {
-                            PrivateConversationRow(conversation: conversation)
-                        }
-                        .accessibilityHint("打开与该用户的私信")
-                        .accessibilityIdentifier("private-conversation-\(conversation.id)")
-                        .onAppear {
-                            guard PaginationPrefetchPolicy.shouldLoadMore(
-                                currentIndex: index,
-                                totalCount: privateConversations.count
-                            ) else { return }
-                            Task { await loadMore() }
-                        }
-                    }
-                } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, message in
                     ReaderCard(action: { openMessage(message) }) {
                         MessageRow(message: message)
@@ -170,7 +143,6 @@ struct MessagesView: View {
                         ) else { return }
                         Task { await loadMore() }
                     }
-                }
                 }
 
                 if isLoading, didLoad {
@@ -234,38 +206,14 @@ struct MessagesView: View {
         }
     }
 
-    private var isMessageListEmpty: Bool {
-        kind == .privateMessage ? privateConversations.isEmpty : items.isEmpty
-    }
-
     private var emptyTitle: String {
-        switch kind {
-        case .reply: return "还没有收到回复"
-        case .at: return "还没有人@我"
-        case .privateMessage: return "暂无私信"
-        }
+        kind == .reply ? "还没有收到回复" : "还没有人@我"
     }
 
     private var emptyMessage: String {
-        switch kind {
-        case .reply:
-            return "别人回复你的帖子或楼层后会显示在这里。"
-        case .at:
-            return "别人在帖子里@你后会显示在这里。"
-        case .privateMessage:
-            return "和其他用户的私信会话会出现在这里。"
-        }
-    }
-
-    private var privateChatIsActive: Binding<Bool> {
-        Binding(
-            get: { activePrivateChat != nil },
-            set: { isActive in
-                if isActive == false {
-                    activePrivateChat = nil
-                }
-            }
-        )
+        kind == .reply
+            ? "别人回复你的帖子或楼层后会显示在这里。"
+            : "别人在帖子里@你后会显示在这里。"
     }
 
     private var messageIsActive: Binding<Bool> {
@@ -284,8 +232,6 @@ struct MessagesView: View {
         loadTask = nil
         requestGeneration += 1
         items = []
-        privateConversations = []
-        activePrivateChat = nil
         nextPage = 1
         hasMore = true
         isLoading = false
@@ -320,17 +266,6 @@ struct MessagesView: View {
         let requestedPage = replacing ? 1 : nextPage
         isLoading = true
         errorMessage = nil
-
-        if requestedKind == .privateMessage {
-            await loadPrivateConversations(
-                account: account,
-                generation: generation,
-                requestedSession: requestedSession,
-                requestedPage: requestedPage,
-                replacing: replacing
-            )
-            return
-        }
         var continuation: LocallyFilteredPaginationDecision?
 
         do {
@@ -394,46 +329,6 @@ struct MessagesView: View {
         var seen = Set<String>()
         return candidates.filter { seen.insert($0.id).inserted }
     }
-
-    private func loadPrivateConversations(
-        account: Account,
-        generation: Int,
-        requestedSession: AccountSessionIdentity,
-        requestedPage: Int,
-        replacing: Bool
-    ) async {
-        do {
-            let page = try await environment.api.privateConversations(
-                account: account,
-                page: requestedPage
-            )
-            guard generation == requestGeneration,
-                  requestedSession == account.sessionIdentity,
-                  kind == .privateMessage else { return }
-            if replacing {
-                privateConversations = page.items
-            } else {
-                let known = Set(privateConversations.map(\.id))
-                privateConversations.append(
-                    contentsOf: page.items.filter { known.contains($0.id) == false }
-                )
-            }
-            nextPage = page.currentPage + 1
-            hasMore = page.hasMore
-            items = []
-        } catch is CancellationError {
-            // ignore
-        } catch {
-            guard generation == requestGeneration,
-                  requestedSession == account.sessionIdentity else { return }
-            errorMessage = ReaderErrorMessage.message(for: error)
-        }
-        guard generation == requestGeneration else { return }
-        isLoading = false
-        didLoad = true
-    }
-
-
 }
 
 private struct MessageRow: View {
@@ -499,8 +394,6 @@ private struct MessageRow: View {
             return message.isFloorReply ? "在楼中楼回复了我" : "回复了我"
         case .at:
             return "@了我"
-        case .privateMessage:
-            return "发来私信"
         }
     }
 
