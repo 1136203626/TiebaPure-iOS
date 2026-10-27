@@ -365,7 +365,7 @@ extension TiebaAPI {
         let threads = items.compactMap(\.asThreadSummary)
         return UserThreadsPage(
             threads: threads,
-            currentPage: requestedPage,
+            currentPage: Int(requestedPage),
             hasMore: items.count >= 20,
             visibility: .visible
         )
