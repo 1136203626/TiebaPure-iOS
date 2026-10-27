@@ -263,32 +263,6 @@ struct SessionMonitoringTiebaAPI: TiebaAPIService {
         }
     }
 
-    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage {
-        try await monitored(account: account) {
-            try await base.privateConversations(account: account, page: page)
-        }
-    }
-
-    func privateChatMessages(
-        account: Account,
-        peerUserID: Int64,
-        beforeMessageID: Int64?
-    ) async throws -> PrivateChatPage {
-        try await monitored(account: account) {
-            try await base.privateChatMessages(
-                account: account,
-                peerUserID: peerUserID,
-                beforeMessageID: beforeMessageID
-            )
-        }
-    }
-
-    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {
-        try await monitored(account: account) {
-            try await base.sendPrivateMessage(account: account, peerUserID: peerUserID, content: content)
-        }
-    }
-
     func setPostLiked(
         account: Account,
         threadID: Int64,
