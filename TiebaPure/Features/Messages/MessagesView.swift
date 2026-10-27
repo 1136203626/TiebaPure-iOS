@@ -54,9 +54,12 @@ struct MessagesView: View {
                 }
             }
         }
-        .navigationDestination(item: $activePrivateChat) { conversation in
-            if let account {
-                PrivateChatView(account: account, peer: conversation.peer)
+        .navigationDestination(isPresented: privateChatIsActive) {
+            if let account, let activePrivateChat {
+                PrivateChatView(account: account, peer: activePrivateChat.peer)
+                    .interactiveNavigationPopStateSync {
+                        self.activePrivateChat = nil
+                    }
             }
         }
         .task {
@@ -168,7 +171,7 @@ struct MessagesView: View {
                         Task { await loadMore() }
                     }
                 }
-                } // end else (non-private list)
+                }
 
                 if isLoading, didLoad {
                     ProgressView()
@@ -252,6 +255,17 @@ struct MessagesView: View {
         case .privateMessage:
             return "和其他用户的私信会话会出现在这里。"
         }
+    }
+
+    private var privateChatIsActive: Binding<Bool> {
+        Binding(
+            get: { activePrivateChat != nil },
+            set: { isActive in
+                if isActive == false {
+                    activePrivateChat = nil
+                }
+            }
+        )
     }
 
     private var messageIsActive: Binding<Bool> {
@@ -380,7 +394,6 @@ struct MessagesView: View {
         var seen = Set<String>()
         return candidates.filter { seen.insert($0.id).inserted }
     }
-}
 
     private func loadPrivateConversations(
         account: Account,
@@ -419,6 +432,9 @@ struct MessagesView: View {
         isLoading = false
         didLoad = true
     }
+
+
+}
 
 private struct MessageRow: View {
     let message: MessageItem
@@ -483,6 +499,8 @@ private struct MessageRow: View {
             return message.isFloorReply ? "在楼中楼回复了我" : "回复了我"
         case .at:
             return "@了我"
+        case .privateMessage:
+            return "发来私信"
         }
     }
 
