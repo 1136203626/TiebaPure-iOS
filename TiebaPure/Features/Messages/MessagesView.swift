@@ -18,6 +18,8 @@ struct MessagesView: View {
     @State private var loadTask: Task<MessagesPage, Error>?
     @State private var activeMessage: MessageItem?
     @State private var navigationSourceLifecycle = NavigationSourceLifecycleState()
+    @State private var privateConversations: [PrivateConversation] = []
+    @State private var activePrivateChat: PrivateConversation?
 
     init(
         account: Account?,
@@ -50,6 +52,11 @@ struct MessagesView: View {
                 .interactiveNavigationPopStateSync {
                     self.activeMessage = nil
                 }
+            }
+        }
+        .navigationDestination(item: $activePrivateChat) { conversation in
+            if let account {
+                PrivateChatView(account: account, peer: conversation.peer)
             }
         }
         .task {
@@ -86,9 +93,10 @@ struct MessagesView: View {
         Picker("消息类型", selection: $kind) {
             Text("回复我的").tag(MessageKind.reply)
             Text("@我的").tag(MessageKind.at)
+            Text("私信").tag(MessageKind.privateMessage)
         }
         .pickerStyle(.segmented)
-        .frame(maxWidth: 320)
+        .frame(maxWidth: 420)
         .frame(minHeight: 44)
         .padding(.horizontal, TiebaPureTheme.Spacing.md)
         .padding(.vertical, TiebaPureTheme.Spacing.xs)
@@ -113,7 +121,13 @@ struct MessagesView: View {
                     Task { await reload() }
                 }
             }
-        } else if items.isEmpty {
+        } else if kind == .privateMessage, privateConversations.isEmpty {
+            ReaderStateView.empty(
+                title: "暂无私信",
+                message: "和其他用户的私信会话会出现在这里。"
+            )
+        } else if kind != .privateMessage, items.isEmpty {
+
             ReaderStateScrollView(refresh: { await reload() }) {
                 ReaderStateView.empty(
                     title: emptyTitle,
@@ -130,7 +144,24 @@ struct MessagesView: View {
     private var messageList: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
+                if kind == .privateMessage {
+                    ForEach(Array(privateConversations.enumerated()), id: \.element.id) { index, conversation in
+                        ReaderCard(action: { activePrivateChat = conversation }) {
+                            PrivateConversationRow(conversation: conversation)
+                        }
+                        .accessibilityHint("打开与该用户的私信")
+                        .accessibilityIdentifier("private-conversation-\(conversation.id)")
+                        .onAppear {
+                            guard PaginationPrefetchPolicy.shouldLoadMore(
+                                currentIndex: index,
+                                totalCount: privateConversations.count
+                            ) else { return }
+                            Task { await loadMore() }
+                        }
+                    }
+                }
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, message in
+                    if kind != .privateMessage {
                     ReaderCard(action: { openMessage(message) }) {
                         MessageRow(message: message)
                     }
@@ -232,6 +263,8 @@ struct MessagesView: View {
         loadTask = nil
         requestGeneration += 1
         items = []
+        privateConversations = []
+        activePrivateChat = nil
         nextPage = 1
         hasMore = true
         isLoading = false
@@ -266,6 +299,17 @@ struct MessagesView: View {
         let requestedPage = replacing ? 1 : nextPage
         isLoading = true
         errorMessage = nil
+
+        if requestedKind == .privateMessage {
+            await loadPrivateConversations(
+                account: account,
+                generation: generation,
+                requestedSession: requestedSession,
+                requestedPage: requestedPage,
+                replacing: replacing
+            )
+            return
+        }
         var continuation: LocallyFilteredPaginationDecision?
 
         do {
