@@ -77,6 +77,9 @@ enum TiebaMessageEndpoint {
     case privateChatLatest
     case privateChatHistory
     case privateChatSend
+    case webPMC
+    case webMsgSend
+    case webTBS
 
     var url: URL {
         switch self {
@@ -92,6 +95,12 @@ enum TiebaMessageEndpoint {
             return TiebaEndpoint.appBase.appending(path: "/c/s/historymsg")
         case .privateChatSend:
             return TiebaEndpoint.appBase.appending(path: "/c/s/addmsg")
+        case .webPMC:
+            return TiebaEndpoint.base.appending(path: "/pmc/pmc")
+        case .webMsgSend:
+            return TiebaEndpoint.base.appending(path: "/msg/send")
+        case .webTBS:
+            return TiebaEndpoint.base.appending(path: "/dc/common/tbs")
         }
     }
 }
@@ -414,6 +423,75 @@ extension TiebaAPI {
     func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.isEmpty == false else { return }
+
+        // 优先网页端私信接口（仍可能被风控），旧版 /c/s/addmsg 多数已失效。
+        var lastError: Error?
+        do {
+            try await sendPrivateMessageViaPMC(account: account, peerUserID: peerUserID, content: trimmed)
+            return
+        } catch {
+            lastError = error
+        }
+        do {
+            try await sendPrivateMessageViaMsgSend(account: account, peerUserID: peerUserID, content: trimmed)
+            return
+        } catch {
+            lastError = error
+        }
+        do {
+            try await sendPrivateMessageViaMiniClient(account: account, peerUserID: peerUserID, content: trimmed)
+            return
+        } catch {
+            lastError = error
+        }
+        if let lastError {
+            throw lastError
+        }
+    }
+
+    private func sendPrivateMessageViaPMC(account: Account, peerUserID: Int64, content: String) async throws {
+        let tbs = account.tbs.isEmpty == false ? account.tbs : try await refreshTBS(account: account)
+        let fields: [String: String] = [
+            "ie": "utf-8",
+            "tbs": tbs,
+            "to_user": "\(peerUserID)",
+            "content": content,
+            "anonymous": "0",
+            "client_type": "2",
+            "client_version": "12.10.1.0"
+        ]
+        let data = try await postWebForm(
+            url: TiebaMessageEndpoint.webPMC.url,
+            fields: fields,
+            headers: [
+                "Cookie": account.minimalCookieHeader,
+                "Referer": "https://tieba.baidu.com/",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            ]
+        )
+        try validateWebSendResponse(data)
+    }
+
+    private func sendPrivateMessageViaMsgSend(account: Account, peerUserID: Int64, content: String) async throws {
+        let fields: [String: String] = [
+            "to_user": "\(peerUserID)",
+            "content": content,
+            "anonymous": "0",
+            "is_comment": "0"
+        ]
+        let data = try await postWebForm(
+            url: TiebaMessageEndpoint.webMsgSend.url,
+            fields: fields,
+            headers: [
+                "Cookie": account.minimalCookieHeader,
+                "Referer": "https://tieba.baidu.com/",
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            ]
+        )
+        try validateWebSendResponse(data)
+    }
+
+    private func sendPrivateMessageViaMiniClient(account: Account, peerUserID: Int64, content: String) async throws {
         var fields = requestBuilder.miniCommonFields()
         fields.removeValue(forKey: "subapp_type")
         fields.removeValue(forKey: "cuid_galaxy2")
@@ -422,8 +500,9 @@ extension TiebaAPI {
         fields["BDUSS"] = account.bduss
         fields["user_id"] = account.uid
         fields["com_id"] = "\(peerUserID)"
-        fields["content"] = trimmed
+        fields["content"] = content
         fields["msg_type"] = "1"
+        fields["last_msg_id"] = "0"
         let response = try await client.postForm(
             TiebaMessageEndpoint.privateChatSend,
             fields: fields,
@@ -432,6 +511,82 @@ extension TiebaAPI {
             as: PrivateChatSendResponseDTO.self
         )
         try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+    }
+
+    private func refreshTBS(account: Account) async throws -> String {
+        let data = try await postWebForm(
+            url: TiebaMessageEndpoint.webTBS.url,
+            fields: [:],
+            headers: [
+                "Cookie": account.minimalCookieHeader,
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+            ]
+        )
+        struct TBSResponse: Decodable {
+            var tbs: String?
+        }
+        if let decoded = try? JSONDecoder().decode(TBSResponse.self, from: data),
+           let tbs = decoded.tbs, tbs.isEmpty == false {
+            return tbs
+        }
+        return account.tbs
+    }
+
+    private func validateWebSendResponse(_ data: Data) throws {
+        struct WebSendDTO: Decodable {
+            var errno: Int?
+            var err_no: Int?
+            var no: Int?
+            var errmsg: String?
+            var error: String?
+            var err_msg: String?
+
+            var code: Int {
+                errno ?? err_no ?? no ?? 0
+            }
+
+            var message: String {
+                errmsg ?? error ?? err_msg ?? "私信发送失败"
+            }
+        }
+        if let dto = try? JSONDecoder().decode(WebSendDTO.self, from: data) {
+            if dto.code != 0 {
+                throw NSError(domain: "TiebaPrivateMessage", code: dto.code, userInfo: [NSLocalizedDescriptionKey: dto.message])
+            }
+            return
+        }
+        // 非 JSON 时仍视为失败，避免误报成功
+        if let text = String(data: data, encoding: .utf8), text.contains("\"errno\":0") || text.contains("\"err_no\":0") {
+            return
+        }
+        throw NSError(domain: "TiebaPrivateMessage", code: -1, userInfo: [NSLocalizedDescriptionKey: "私信发送失败，官方接口可能已限制第三方客户端"])
+    }
+
+
+    private func postWebForm(url: URL, fields: [String: String], headers: [String: String]) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        headers.forEach { request.setValue($0.value, forHTTPHeaderField: $0.key) }
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?")
+        let body = fields
+            .map { key, value in
+                let k = key.addingPercentEncoding(withAllowedCharacters: allowed)?.replacingOccurrences(of: "%20", with: "+") ?? key
+                let v = value.addingPercentEncoding(withAllowedCharacters: allowed)?.replacingOccurrences(of: "%20", with: "+") ?? value
+                return "\(k)=\(v)"
+            }
+            .joined(separator: "&")
+        request.httpBody = body.data(using: .utf8)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) == false {
+            throw NSError(
+                domain: "TiebaPrivateMessage",
+                code: http.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "HTTP \(http.statusCode)"]
+            )
+        }
+        return data
     }
 
     private func privateMessageHeaders() -> [String: String] {
