@@ -44,7 +44,6 @@ struct UserProfileView: View {
     @State private var threads: [ThreadSummary] = []
     @State private var deletionTargetsByThreadID: [Int64: OwnThreadDeletionTarget] = [:]
     @State private var selectedTab: UserProfileTab = .threads
-    @State private var showsPrivateChat = false
     @State private var nextPage = 1
     @State private var hasMoreThreads = true
     @State private var threadsVisibility: UserContentVisibility = .visible
@@ -235,13 +234,7 @@ struct UserProfileView: View {
             isLoadingThreads = false
         }
         .accessibilityIdentifier("user-profile-screen")
-        
-        .navigationDestination(isPresented: $showsPrivateChat) {
-            if let account {
-                PrivateChatView(account: account, peer: profile?.user ?? user)
-            }
-        }
-.fullScreenInteractiveNavigationPop()
+        .fullScreenInteractiveNavigationPop()
     }
 
     private func profileScrollView(_ profile: UserProfile) -> some View {
@@ -253,8 +246,7 @@ struct UserProfileView: View {
                     onEditProfile: UserProfileManagementPolicy.canEdit(
                         profile: profile,
                         account: account
-                    ) && pendingProfileEditRequest == nil ? { showsProfileEditor = true } : nil,
-                    onPrivateMessage: account == nil ? nil : { showsPrivateChat = true }
+                    ) && pendingProfileEditRequest == nil ? { showsProfileEditor = true } : nil
                 )
                     .environment(\.userProfileFollowAction, UserProfileFollowAction(
                         isUpdating: isUpdatingFollow,
@@ -1195,7 +1187,6 @@ private struct UserProfileHeader: View {
     let profile: UserProfile
     let onOpenRelationship: (UserRelationshipKind) -> Void
     let onEditProfile: (() -> Void)?
-    let onPrivateMessage: (() -> Void)?
 
     private enum Layout {
         static let avatarSize: CGFloat = 56
@@ -1215,11 +1206,14 @@ private struct UserProfileHeader: View {
             identityAndAction
 
             if profile.intro.isEmpty == false {
-                Text(profile.intro)
-                    .font(.body)
-                    .foregroundStyle(.primary)
+                InlineContentText(
+                    blocks: [.text(profile.intro)],
+                    style: .body,
+                    allowsLinkInteraction: false,
+                    allowsTextSelection: true,
+                    accessibilityIdentifier: "user-profile-intro"
+                )
                     .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
                     .accessibilityLabel("个人简介：\(profile.intro)")
                     .padding(.top, TiebaPureTheme.Spacing.sm)
             }
@@ -1335,31 +1329,21 @@ private struct UserProfileHeader: View {
         if let onEditProfile {
             editProfileButton(action: onEditProfile)
         } else if profile.isCurrentUser == false {
-            VStack(spacing: TiebaPureTheme.Spacing.xs) {
-                followButton
-                if let onPrivateMessage {
-                    Button(action: onPrivateMessage) {
-                        Label("发私信", systemImage: "envelope")
-                            .frame(maxWidth: .infinity, minHeight: 36)
-                    }
-                    .buttonStyle(.bordered)
-                    .accessibilityLabel("发私信")
-                    .accessibilityHint("与该用户私信聊天")
-                    .accessibilityIdentifier("user-profile-private-message")
-                }
-            }
+            followButton
         }
     }
 
     private var profileName: some View {
-        Text(profile.user.displayNameResolved)
-            .font(.title2.weight(.bold))
-            .foregroundStyle(.primary)
-            .lineLimit(2)
+        InlineContentText(
+            blocks: [.text(profile.user.displayNameResolved)],
+            style: .title,
+            lineLimit: 2,
+            allowsLinkInteraction: false,
+            allowsTextSelection: true,
+            accessibilityIdentifier: "user-profile-name"
+        )
             .fixedSize(horizontal: false, vertical: true)
             .layoutPriority(1)
-            .textSelection(.enabled)
-            .accessibilityIdentifier("user-profile-name")
     }
 
     private var followButton: some View {
