@@ -68,9 +68,6 @@ protocol TiebaAPIService {
         favorited: Bool
     ) async throws
     func messages(account: Account, kind: MessageKind, page: Int) async throws -> MessagesPage
-    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage
-    func privateChatMessages(account: Account, peerUserID: Int64, beforeMessageID: Int64?) async throws -> PrivateChatPage
-    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws
     func setPostLiked(
         account: Account,
         threadID: Int64,

@@ -671,20 +671,6 @@ struct FixtureTiebaAPI: TiebaAPIService {
         return MessagesPage(items: items, currentPage: page, hasMore: false)
     }
 
-    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage {
-        PrivateConversationsPage(items: [], currentPage: page, hasMore: false)
-    }
-
-    func privateChatMessages(
-        account: Account,
-        peerUserID: Int64,
-        beforeMessageID: Int64?
-    ) async throws -> PrivateChatPage {
-        PrivateChatPage(messages: [], hasMore: false)
-    }
-
-    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {}
-
     func setPostLiked(
         account: Account,
         threadID: Int64,
