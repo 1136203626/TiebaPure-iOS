@@ -314,6 +314,8 @@ struct MessageListResponseDTO: Decodable {
             return replyList ?? []
         case .at:
             return atList ?? []
+        case .privateMessage:
+            return []
         }
     }
 }
@@ -349,6 +351,98 @@ extension TiebaAPI {
             hasMore: response.hasMore
         )
     }
+
+    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage {
+        let requestedPage = try TiebaRequestValuePolicy.signedPage(page)
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["pn"] = "\(requestedPage)"
+        let response = try await client.postForm(
+            TiebaMessageEndpoint.privateConversationList,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateConversationListResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+        let items = response.conversations
+        return PrivateConversationsPage(
+            items: items,
+            currentPage: Int(requestedPage),
+            hasMore: items.count >= 10
+        )
+    }
+
+    func privateChatMessages(
+        account: Account,
+        peerUserID: Int64,
+        beforeMessageID: Int64?
+    ) async throws -> PrivateChatPage {
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["user_id"] = account.uid
+        fields["com_id"] = "\(peerUserID)"
+        let endpoint: TiebaMessageEndpoint
+        if let beforeMessageID, beforeMessageID > 0 {
+            fields["msg_id"] = "\(beforeMessageID)"
+            endpoint = .privateChatHistory
+        } else {
+            fields["msg_id"] = "0"
+            endpoint = .privateChatLatest
+        }
+        let response = try await client.postForm(
+            endpoint,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateChatMessagesResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+        let selfID = Int64(account.uid) ?? 0
+        let messages = response.messages(selfUserID: selfID)
+        return PrivateChatPage(messages: messages, hasMore: messages.count >= 10)
+    }
+
+    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["user_id"] = account.uid
+        fields["com_id"] = "\(peerUserID)"
+        fields["content"] = trimmed
+        fields["msg_type"] = "1"
+        let response = try await client.postForm(
+            TiebaMessageEndpoint.privateChatSend,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateChatSendResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+    }
+
+    private func privateMessageHeaders() -> [String: String] {
+        [
+            "Cookie": "ka=open",
+            "Pragma": "no-cache",
+            "User-Agent": "bdtb for Android \(TiebaMessageRequestFactory.clientVersion)",
+            "cuid": requestBuilder.miniCUID
+        ]
+    }
+
 }
 
 extension TiebaHTTPClient {
@@ -433,101 +527,6 @@ private extension KeyedDecodingContainer {
         return 0
     }
 }
-
-
-    // MARK: - 私信
-
-    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage {
-        let requestedPage = try TiebaRequestValuePolicy.signedPage(page)
-        var fields = requestBuilder.miniCommonFields()
-        fields.removeValue(forKey: "subapp_type")
-        fields.removeValue(forKey: "cuid_galaxy2")
-        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
-        fields["from"] = "baidu_appstore"
-        fields["BDUSS"] = account.bduss
-        fields["pn"] = "\(requestedPage)"
-        let response = try await client.postForm(
-            TiebaMessageEndpoint.privateConversationList,
-            fields: fields,
-            headers: privateMessageHeaders(),
-            signingSecret: "tiebaclient!!!",
-            as: PrivateConversationListResponseDTO.self
-        )
-        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
-        let items = response.conversations
-        return PrivateConversationsPage(
-            items: items,
-            currentPage: requestedPage,
-            hasMore: items.count >= 10
-        )
-    }
-
-    func privateChatMessages(
-        account: Account,
-        peerUserID: Int64,
-        beforeMessageID: Int64?
-    ) async throws -> PrivateChatPage {
-        var fields = requestBuilder.miniCommonFields()
-        fields.removeValue(forKey: "subapp_type")
-        fields.removeValue(forKey: "cuid_galaxy2")
-        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
-        fields["from"] = "baidu_appstore"
-        fields["BDUSS"] = account.bduss
-        fields["user_id"] = account.uid
-        fields["com_id"] = "\(peerUserID)"
-        let endpoint: TiebaMessageEndpoint
-        if let beforeMessageID, beforeMessageID > 0 {
-            fields["msg_id"] = "\(beforeMessageID)"
-            endpoint = .privateChatHistory
-        } else {
-            fields["msg_id"] = "0"
-            endpoint = .privateChatLatest
-        }
-        let response = try await client.postForm(
-            endpoint,
-            fields: fields,
-            headers: privateMessageHeaders(),
-            signingSecret: "tiebaclient!!!",
-            as: PrivateChatMessagesResponseDTO.self
-        )
-        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
-        let selfID = Int64(account.uid) ?? 0
-        let messages = response.messages(selfUserID: selfID)
-        return PrivateChatPage(messages: messages, hasMore: messages.count >= 10)
-    }
-
-    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {
-        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.isEmpty == false else { return }
-        var fields = requestBuilder.miniCommonFields()
-        fields.removeValue(forKey: "subapp_type")
-        fields.removeValue(forKey: "cuid_galaxy2")
-        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
-        fields["from"] = "baidu_appstore"
-        fields["BDUSS"] = account.bduss
-        fields["user_id"] = account.uid
-        fields["com_id"] = "\(peerUserID)"
-        fields["content"] = trimmed
-        fields["msg_type"] = "1"
-        let response = try await client.postForm(
-            TiebaMessageEndpoint.privateChatSend,
-            fields: fields,
-            headers: privateMessageHeaders(),
-            signingSecret: "tiebaclient!!!",
-            as: PrivateChatSendResponseDTO.self
-        )
-        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
-    }
-
-    private func privateMessageHeaders() -> [String: String] {
-        [
-            "Cookie": "ka=open",
-            "Pragma": "no-cache",
-            "User-Agent": "bdtb for Android \(TiebaMessageRequestFactory.clientVersion)",
-            "cuid": requestBuilder.miniCUID
-        ]
-    }
-
 
 
 // MARK: - 私信 DTO
@@ -757,4 +756,3 @@ private struct PrivateChatSendResponseDTO: Decodable {
         errorMessage = (try? c.decode(String.self, forKey: .errorMessage)) ?? ""
     }
 }
-
