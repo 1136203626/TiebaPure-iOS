@@ -3,6 +3,7 @@ import Foundation
 enum MessageKind: String, CaseIterable, Sendable {
     case reply
     case at
+    case privateMessage
 }
 
 struct MessageItem: Identifiable, Equatable, Sendable {
@@ -21,6 +22,32 @@ struct MessageItem: Identifiable, Equatable, Sendable {
 struct MessagesPage: Equatable, Sendable {
     var items: [MessageItem]
     var currentPage: Int
+    var hasMore: Bool
+}
+
+struct PrivateConversation: Identifiable, Equatable, Hashable, Sendable {
+    var id: Int64
+    var peer: UserSummary
+    var lastMessage: String
+    var updatedAt: Date?
+    var unreadCount: Int
+}
+
+struct PrivateConversationsPage: Equatable, Sendable {
+    var items: [PrivateConversation]
+    var currentPage: Int
+    var hasMore: Bool
+}
+
+struct PrivateChatMessage: Identifiable, Equatable, Sendable {
+    var id: Int64
+    var content: String
+    var isOutgoing: Bool
+    var createdAt: Date?
+}
+
+struct PrivateChatPage: Equatable, Sendable {
+    var messages: [PrivateChatMessage]
     var hasMore: Bool
 }
 
@@ -46,6 +73,10 @@ enum MessagePaginationPolicy {
 enum TiebaMessageEndpoint {
     case replyMe
     case atMe
+    case privateConversationList
+    case privateChatLatest
+    case privateChatHistory
+    case privateChatSend
 
     var url: URL {
         switch self {
@@ -53,6 +84,14 @@ enum TiebaMessageEndpoint {
             return TiebaEndpoint.appBase.appending(path: "/c/u/feed/replyme")
         case .atMe:
             return TiebaEndpoint.appBase.appending(path: "/c/u/feed/atme")
+        case .privateConversationList:
+            return TiebaEndpoint.appBase.appending(path: "/c/s/comlist")
+        case .privateChatLatest:
+            return TiebaEndpoint.appBase.appending(path: "/c/s/msg")
+        case .privateChatHistory:
+            return TiebaEndpoint.appBase.appending(path: "/c/s/historymsg")
+        case .privateChatSend:
+            return TiebaEndpoint.appBase.appending(path: "/c/s/addmsg")
         }
     }
 }
@@ -286,6 +325,9 @@ extension TiebaAPI {
             page: page,
             requestBuilder: requestBuilder
         )
+        guard kind == .reply || kind == .at else {
+            return MessagesPage(items: [], currentPage: page, hasMore: false)
+        }
         let endpoint: TiebaMessageEndpoint = kind == .reply ? .replyMe : .atMe
         let response = try await client.postForm(
             endpoint,
@@ -391,3 +433,328 @@ private extension KeyedDecodingContainer {
         return 0
     }
 }
+
+
+    // MARK: - 私信
+
+    func privateConversations(account: Account, page: Int) async throws -> PrivateConversationsPage {
+        let requestedPage = try TiebaRequestValuePolicy.signedPage(page)
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["pn"] = "\(requestedPage)"
+        let response = try await client.postForm(
+            TiebaMessageEndpoint.privateConversationList,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateConversationListResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+        let items = response.conversations
+        return PrivateConversationsPage(
+            items: items,
+            currentPage: requestedPage,
+            hasMore: items.count >= 10
+        )
+    }
+
+    func privateChatMessages(
+        account: Account,
+        peerUserID: Int64,
+        beforeMessageID: Int64?
+    ) async throws -> PrivateChatPage {
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["user_id"] = account.uid
+        fields["com_id"] = "\(peerUserID)"
+        let endpoint: TiebaMessageEndpoint
+        if let beforeMessageID, beforeMessageID > 0 {
+            fields["msg_id"] = "\(beforeMessageID)"
+            endpoint = .privateChatHistory
+        } else {
+            fields["msg_id"] = "0"
+            endpoint = .privateChatLatest
+        }
+        let response = try await client.postForm(
+            endpoint,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateChatMessagesResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+        let selfID = Int64(account.uid) ?? 0
+        let messages = response.messages(selfUserID: selfID)
+        return PrivateChatPage(messages: messages, hasMore: messages.count >= 10)
+    }
+
+    func sendPrivateMessage(account: Account, peerUserID: Int64, content: String) async throws {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty == false else { return }
+        var fields = requestBuilder.miniCommonFields()
+        fields.removeValue(forKey: "subapp_type")
+        fields.removeValue(forKey: "cuid_galaxy2")
+        fields["_client_version"] = TiebaMessageRequestFactory.clientVersion
+        fields["from"] = "baidu_appstore"
+        fields["BDUSS"] = account.bduss
+        fields["user_id"] = account.uid
+        fields["com_id"] = "\(peerUserID)"
+        fields["content"] = trimmed
+        fields["msg_type"] = "1"
+        let response = try await client.postForm(
+            TiebaMessageEndpoint.privateChatSend,
+            fields: fields,
+            headers: privateMessageHeaders(),
+            signingSecret: "tiebaclient!!!",
+            as: PrivateChatSendResponseDTO.self
+        )
+        try TiebaResponseValidator.validate(code: response.errorCode, message: response.errorMessage)
+    }
+
+    private func privateMessageHeaders() -> [String: String] {
+        [
+            "Cookie": "ka=open",
+            "Pragma": "no-cache",
+            "User-Agent": "bdtb for Android \(TiebaMessageRequestFactory.clientVersion)",
+            "cuid": requestBuilder.miniCUID
+        ]
+    }
+
+
+
+// MARK: - 私信 DTO
+
+private struct PrivateConversationListResponseDTO: Decodable {
+    var errorCode: Int
+    var errorMessage: String
+    var messageList: [PrivateConversationDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case errorCode = "error_code"
+        case errorMessage = "error_msg"
+        case messageList = "message_list"
+        case comList = "com_list"
+        case list
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decode(Int.self, forKey: .errorCode) {
+            errorCode = v
+        } else if let s = try? c.decode(String.self, forKey: .errorCode), let v = Int(s) {
+            errorCode = v
+        } else {
+            errorCode = 0
+        }
+        errorMessage = (try? c.decode(String.self, forKey: .errorMessage)) ?? ""
+        if let list = try? c.decode([PrivateConversationDTO].self, forKey: .messageList) {
+            messageList = list
+        } else if let list = try? c.decode([PrivateConversationDTO].self, forKey: .comList) {
+            messageList = list
+        } else if let list = try? c.decode([PrivateConversationDTO].self, forKey: .list) {
+            messageList = list
+        } else {
+            messageList = []
+        }
+    }
+
+    var conversations: [PrivateConversation] {
+        (messageList ?? []).compactMap(\.asModel)
+    }
+}
+
+private struct PrivateConversationDTO: Decodable {
+    var comID: Int64?
+    var userID: Int64?
+    var name: String?
+    var nameShow: String?
+    var portrait: String?
+    var content: String?
+    var time: Int64?
+    var unread: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case comID = "com_id"
+        case userID = "user_id"
+        case id
+        case name
+        case uname
+        case nameShow = "name_show"
+        case portrait
+        case content
+        case abstract
+        case time
+        case createTime = "create_time"
+        case unread
+        case unreadNum = "unread_num"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        comID = Self.i64(c, .comID) ?? Self.i64(c, .userID) ?? Self.i64(c, .id)
+        userID = Self.i64(c, .userID) ?? Self.i64(c, .comID) ?? Self.i64(c, .id)
+        name = (try? c.decode(String.self, forKey: .name)) ?? (try? c.decode(String.self, forKey: .uname))
+        nameShow = try? c.decode(String.self, forKey: .nameShow)
+        portrait = try? c.decode(String.self, forKey: .portrait)
+        content = (try? c.decode(String.self, forKey: .content)) ?? (try? c.decode(String.self, forKey: .abstract))
+        time = Self.i64(c, .time) ?? Self.i64(c, .createTime)
+        unread = Self.i(c, .unread) ?? Self.i(c, .unreadNum)
+    }
+
+    var asModel: PrivateConversation? {
+        let peerID = userID ?? comID ?? 0
+        guard peerID > 0 else { return nil }
+        let peer = UserSummary(
+            id: peerID,
+            name: name ?? "",
+            displayName: nameShow ?? name ?? "",
+            portrait: portrait ?? ""
+        )
+        let updated: Date?
+        if let time, time > 0 {
+            updated = Date(timeIntervalSince1970: TimeInterval(time > 10_000_000_000 ? time / 1000 : time))
+        } else {
+            updated = nil
+        }
+        return PrivateConversation(
+            id: peerID,
+            peer: peer,
+            lastMessage: content ?? "",
+            updatedAt: updated,
+            unreadCount: unread ?? 0
+        )
+    }
+
+    private static func i64(_ c: KeyedDecodingContainer<CodingKeys>, _ k: CodingKeys) -> Int64? {
+        if let v = try? c.decode(Int64.self, forKey: k) { return v }
+        if let s = try? c.decode(String.self, forKey: k), let v = Int64(s) { return v }
+        if let v = try? c.decode(Int.self, forKey: k) { return Int64(v) }
+        return nil
+    }
+
+    private static func i(_ c: KeyedDecodingContainer<CodingKeys>, _ k: CodingKeys) -> Int? {
+        if let v = try? c.decode(Int.self, forKey: k) { return v }
+        if let s = try? c.decode(String.self, forKey: k), let v = Int(s) { return v }
+        return nil
+    }
+}
+
+private struct PrivateChatMessagesResponseDTO: Decodable {
+    var errorCode: Int
+    var errorMessage: String
+    var messageList: [PrivateChatMessageDTO]?
+
+    enum CodingKeys: String, CodingKey {
+        case errorCode = "error_code"
+        case errorMessage = "error_msg"
+        case messageList = "message_list"
+        case list
+        case msgList = "msg_list"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decode(Int.self, forKey: .errorCode) {
+            errorCode = v
+        } else if let s = try? c.decode(String.self, forKey: .errorCode), let v = Int(s) {
+            errorCode = v
+        } else {
+            errorCode = 0
+        }
+        errorMessage = (try? c.decode(String.self, forKey: .errorMessage)) ?? ""
+        if let list = try? c.decode([PrivateChatMessageDTO].self, forKey: .messageList) {
+            messageList = list
+        } else if let list = try? c.decode([PrivateChatMessageDTO].self, forKey: .list) {
+            messageList = list
+        } else if let list = try? c.decode([PrivateChatMessageDTO].self, forKey: .msgList) {
+            messageList = list
+        } else {
+            messageList = []
+        }
+    }
+
+    func messages(selfUserID: Int64) -> [PrivateChatMessage] {
+        (messageList ?? []).compactMap { $0.asModel(selfUserID: selfUserID) }
+    }
+}
+
+private struct PrivateChatMessageDTO: Decodable {
+    var msgID: Int64?
+    var content: String?
+    var fromID: Int64?
+    var time: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case msgID = "msg_id"
+        case id
+        case content
+        case fromID = "from_uid"
+        case fromUserID = "from_user_id"
+        case userID = "user_id"
+        case time
+        case createTime = "create_time"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        msgID = Self.i64(c, .msgID) ?? Self.i64(c, .id)
+        content = try? c.decode(String.self, forKey: .content)
+        fromID = Self.i64(c, .fromID) ?? Self.i64(c, .fromUserID) ?? Self.i64(c, .userID)
+        time = Self.i64(c, .time) ?? Self.i64(c, .createTime)
+    }
+
+    func asModel(selfUserID: Int64) -> PrivateChatMessage? {
+        let id = msgID ?? 0
+        guard id > 0 || (content?.isEmpty == false) else { return nil }
+        let created: Date?
+        if let time, time > 0 {
+            created = Date(timeIntervalSince1970: TimeInterval(time > 10_000_000_000 ? time / 1000 : time))
+        } else {
+            created = nil
+        }
+        return PrivateChatMessage(
+            id: id == 0 ? Int64((content ?? "").hashValue) : id,
+            content: content ?? "",
+            isOutgoing: (fromID ?? 0) == selfUserID,
+            createdAt: created
+        )
+    }
+
+    private static func i64(_ c: KeyedDecodingContainer<CodingKeys>, _ k: CodingKeys) -> Int64? {
+        if let v = try? c.decode(Int64.self, forKey: k) { return v }
+        if let s = try? c.decode(String.self, forKey: k), let v = Int64(s) { return v }
+        if let v = try? c.decode(Int.self, forKey: k) { return Int64(v) }
+        return nil
+    }
+}
+
+private struct PrivateChatSendResponseDTO: Decodable {
+    var errorCode: Int
+    var errorMessage: String
+
+    enum CodingKeys: String, CodingKey {
+        case errorCode = "error_code"
+        case errorMessage = "error_msg"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        if let v = try? c.decode(Int.self, forKey: .errorCode) {
+            errorCode = v
+        } else if let s = try? c.decode(String.self, forKey: .errorCode), let v = Int(s) {
+            errorCode = v
+        } else {
+            errorCode = 0
+        }
+        errorMessage = (try? c.decode(String.self, forKey: .errorMessage)) ?? ""
+    }
+}
+
