@@ -109,25 +109,19 @@ struct MessagesView: View {
             ReaderStateView(
                 kind: .empty,
                 title: "登录后查看消息",
-                message: "登录后可以在这里查看回复我的和@我的消息。",
+                message: "登录后可以在这里查看回复我的、@我的和私信。",
                 systemImage: "person.crop.circle.badge.exclamationmark"
             )
             .accessibilityIdentifier("messages-login-prompt")
         } else if isLoading, didLoad == false {
             ReaderStateView.loading("正在加载消息")
-        } else if let errorMessage, items.isEmpty {
+        } else if let errorMessage, isMessageListEmpty {
             ReaderStateScrollView(refresh: { await reload() }) {
                 ReaderStateView.error(message: errorMessage) {
                     Task { await reload() }
                 }
             }
-        } else if kind == .privateMessage, privateConversations.isEmpty {
-            ReaderStateView.empty(
-                title: "暂无私信",
-                message: "和其他用户的私信会话会出现在这里。"
-            )
-        } else if kind != .privateMessage, items.isEmpty {
-
+        } else if isMessageListEmpty {
             ReaderStateScrollView(refresh: { await reload() }) {
                 ReaderStateView.empty(
                     title: emptyTitle,
@@ -159,9 +153,8 @@ struct MessagesView: View {
                             Task { await loadMore() }
                         }
                     }
-                }
+                } else {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, message in
-                    if kind != .privateMessage {
                     ReaderCard(action: { openMessage(message) }) {
                         MessageRow(message: message)
                     }
@@ -175,6 +168,7 @@ struct MessagesView: View {
                         Task { await loadMore() }
                     }
                 }
+                } // end else (non-private list)
 
                 if isLoading, didLoad {
                     ProgressView()
@@ -237,14 +231,27 @@ struct MessagesView: View {
         }
     }
 
+    private var isMessageListEmpty: Bool {
+        kind == .privateMessage ? privateConversations.isEmpty : items.isEmpty
+    }
+
     private var emptyTitle: String {
-        kind == .reply ? "还没有收到回复" : "还没有人@我"
+        switch kind {
+        case .reply: return "还没有收到回复"
+        case .at: return "还没有人@我"
+        case .privateMessage: return "暂无私信"
+        }
     }
 
     private var emptyMessage: String {
-        kind == .reply
-            ? "别人回复你的帖子或楼层后会显示在这里。"
-            : "别人在帖子里@你后会显示在这里。"
+        switch kind {
+        case .reply:
+            return "别人回复你的帖子或楼层后会显示在这里。"
+        case .at:
+            return "别人在帖子里@你后会显示在这里。"
+        case .privateMessage:
+            return "和其他用户的私信会话会出现在这里。"
+        }
     }
 
     private var messageIsActive: Binding<Bool> {
@@ -374,6 +381,44 @@ struct MessagesView: View {
         return candidates.filter { seen.insert($0.id).inserted }
     }
 }
+
+    private func loadPrivateConversations(
+        account: Account,
+        generation: Int,
+        requestedSession: AccountSessionIdentity,
+        requestedPage: Int,
+        replacing: Bool
+    ) async {
+        do {
+            let page = try await environment.api.privateConversations(
+                account: account,
+                page: requestedPage
+            )
+            guard generation == requestGeneration,
+                  requestedSession == account.sessionIdentity,
+                  kind == .privateMessage else { return }
+            if replacing {
+                privateConversations = page.items
+            } else {
+                let known = Set(privateConversations.map(\.id))
+                privateConversations.append(
+                    contentsOf: page.items.filter { known.contains($0.id) == false }
+                )
+            }
+            nextPage = page.currentPage + 1
+            hasMore = page.hasMore
+            items = []
+        } catch is CancellationError {
+            // ignore
+        } catch {
+            guard generation == requestGeneration,
+                  requestedSession == account.sessionIdentity else { return }
+            errorMessage = ReaderErrorMessage.message(for: error)
+        }
+        guard generation == requestGeneration else { return }
+        isLoading = false
+        didLoad = true
+    }
 
 private struct MessageRow: View {
     let message: MessageItem
