@@ -72,13 +72,10 @@ struct ForumThreadsView: View {
         }
         .navigationTitle(forum.displayName)
         .navigationBarTitleDisplayMode(.inline)
-        .onReceive(NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost)) { note in
-            guard let postID = note.userInfo?["postID"] as? UInt64, postID > 0,
-                  let threadID = note.userInfo?["threadID"] as? Int64 else { return }
-            if activeThread?.threadID == threadID { return }
-            let forumID = note.userInfo?["forumID"] as? Int64 ?? forum.id
-            openThread(threadID: threadID, forumID: forumID, initialPostID: postID)
-        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost),
+            perform: handleJumpToThreadPost
+        )
         .navigationDestination(isPresented: searchIsActive) {
             if let activeSearch {
                 SearchResultsView(account: account, scope: activeSearch.scope, initialKeyword: activeSearch.keyword)
@@ -576,6 +573,14 @@ struct ForumThreadsView: View {
                 if isPresented == false { forumActionError = nil }
             }
         )
+    }
+
+    private func handleJumpToThreadPost(_ note: Notification) {
+        guard let postID = note.userInfo?["postID"] as? UInt64, postID > 0,
+              let threadID = note.userInfo?["threadID"] as? Int64 else { return }
+        if activeThread?.threadID == threadID { return }
+        let forumID = note.userInfo?["forumID"] as? Int64 ?? forum.id
+        openThread(threadID: threadID, forumID: forumID, initialPostID: postID)
     }
 
     private func openThread(threadID: Int64, forumID: Int64?, initialPostID: UInt64? = nil) {
