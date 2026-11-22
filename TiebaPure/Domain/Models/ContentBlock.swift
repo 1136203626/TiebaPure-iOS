@@ -141,10 +141,73 @@ struct ImageContent: Equatable, Codable, Sendable {
     var width: Int
     var height: Int
     var showOriginalButton: Bool
+    /// 全帖预览时标记图片所属楼层；仅运行时使用，旧存档解码为 nil。
+    var sourcePostID: UInt64? = nil
+    var sourceFloor: Int? = nil
 
     var aspectRatio: Double {
         guard width > 0, height > 0 else { return 1 }
         return Double(width) / Double(height)
+    }
+
+    func tagged(postID: UInt64, floor: Int) -> ImageContent {
+        var copy = self
+        copy.sourcePostID = postID
+        copy.sourceFloor = floor
+        return copy
+    }
+}
+
+enum ThreadImageGalleryBuilder {
+    /// 按楼层顺序收集帖子内全部图片（主楼 + 回复），并写入楼层元数据。
+    static func images(mainPost: Post?, posts: [Post]) -> [ImageContent] {
+        var ordered: [Post] = []
+        if let mainPost {
+            ordered.append(mainPost)
+        }
+        for post in posts where ordered.contains(where: { $0.id == post.id }) == false {
+            ordered.append(post)
+        }
+        var result: [ImageContent] = []
+        for post in ordered {
+            for block in post.blocks {
+                if case let .image(image) = block {
+                    result.append(image.tagged(postID: post.id, floor: post.floor))
+                }
+            }
+        }
+        return result
+    }
+
+    static func index(
+        of image: ImageContent,
+        in gallery: [ImageContent],
+        fallbackLocalIndex: Int
+    ) -> Int {
+        if let postID = image.sourcePostID {
+            if let match = gallery.firstIndex(where: {
+                $0.sourcePostID == postID
+                    && (
+                        $0.originalURL == image.originalURL
+                            || $0.thumbnailURL == image.thumbnailURL
+                            || (
+                                $0.originalURL == nil
+                                    && $0.thumbnailURL == nil
+                                    && $0.width == image.width
+                                    && $0.height == image.height
+                            )
+                    )
+            }) {
+                return match
+            }
+        }
+        if let match = gallery.firstIndex(where: {
+            ($0.originalURL != nil && $0.originalURL == image.originalURL)
+                || ($0.thumbnailURL != nil && $0.thumbnailURL == image.thumbnailURL)
+        }) {
+            return match
+        }
+        return min(max(fallbackLocalIndex, 0), max(gallery.count - 1, 0))
     }
 }
 
