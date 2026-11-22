@@ -2229,6 +2229,11 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
 }
 
 
+enum ThreadImageGalleryLoadPolicy {
+    static let maximumPages = 5
+    static let maximumImages = 120
+}
+
 enum ThreadImagePreviewPresenter {
     @MainActor
     static func presentFromFeed(
@@ -2242,9 +2247,8 @@ enum ThreadImagePreviewPresenter {
         sourceAnchor: ImagePreviewSourceAnchor?,
         prefetchesAdjacentPages: Bool
     ) {
-        // 列表点图必须立刻打开：不要先等 threadPage 拉全帖图廊（会卡约 1s）。
-        // 全帖左右滑在帖子详情内完成；列表侧保留跳转楼层上下文。
-        let gallery = summaryImages.map { image in
+        // 先立刻打开列表摘要图，避免等待网络；全帖图廊在后台补齐后热更新。
+        let summaryGallery = summaryImages.map { image -> ImageContent in
             if image.sourcePostID != nil { return image }
             if let firstPostID = thread.firstPostID {
                 return image.tagged(postID: firstPostID, floor: 1)
@@ -2253,24 +2257,104 @@ enum ThreadImagePreviewPresenter {
         }
         let startIndex = ImagePreviewIndexPolicy.clampedIndex(
             initialIndex,
-            totalCount: max(gallery.count, 1)
+            totalCount: max(summaryGallery.count, 1)
         )
+        let focusImage = summaryGallery.indices.contains(startIndex)
+            ? summaryGallery[startIndex]
+            : summaryGallery.first
 
-        ImagePreviewCoordinator.shared.present(
-            ImagePreviewSession(
-                images: gallery.isEmpty ? summaryImages : gallery,
-                initialIndex: startIndex,
-                sourceFrame: sourceFrame,
-                sourceImage: sourceImage,
-                sourceAnchor: sourceAnchor,
-                prefetchesAdjacentPages: prefetchesAdjacentPages,
-                contextThreadID: thread.id,
-                contextForumID: thread.forumID
-            )
+        let session = ImagePreviewSession(
+            images: summaryGallery.isEmpty ? summaryImages : summaryGallery,
+            initialIndex: startIndex,
+            sourceFrame: sourceFrame,
+            sourceImage: sourceImage,
+            sourceAnchor: sourceAnchor,
+            prefetchesAdjacentPages: prefetchesAdjacentPages,
+            contextThreadID: thread.id,
+            contextForumID: thread.forumID
         )
+        ImagePreviewCoordinator.shared.present(session)
+
+        Task {
+            let fullGallery = await loadGallery(
+                threadID: thread.id,
+                forumID: thread.forumID,
+                account: account,
+                api: api,
+                fallback: summaryGallery,
+                firstPostID: thread.firstPostID
+            )
+            let shouldExpand = fullGallery.count > summaryGallery.count
+                || fullGallery.contains(where: { ($0.sourceFloor ?? 1) > 1 })
+            guard shouldExpand else { return }
+            ImagePreviewCoordinator.shared.expandActiveGallery(
+                images: fullGallery,
+                focus: focusImage,
+                sessionID: session.id
+            )
+        }
     }
 
+    @MainActor
+    private static func loadGallery(
+        threadID: Int64,
+        forumID: Int64?,
+        account: Account?,
+        api: any TiebaAPIService,
+        fallback: [ImageContent],
+        firstPostID: UInt64?
+    ) async -> [ImageContent] {
+        var collected: [ImageContent] = []
+        var seen = Set<String>()
 
+        func appendUnique(_ images: [ImageContent]) {
+            for image in images {
+                let key = (image.originalURL ?? image.thumbnailURL)?.absoluteString
+                    ?? "img-\(image.width)-\(image.height)-\(image.sourcePostID ?? 0)"
+                guard seen.insert(key).inserted else { continue }
+                collected.append(image)
+            }
+        }
+
+        do {
+            var page = 1
+            var hasMore = true
+            while hasMore && page <= ThreadImageGalleryLoadPolicy.maximumPages {
+                let threadPage = try await api.threadPage(
+                    account: account,
+                    threadID: threadID,
+                    page: page,
+                    forumID: forumID,
+                    postID: nil,
+                    seeLz: false,
+                    sortType: .ascending
+                )
+                appendUnique(
+                    ThreadImageGalleryBuilder.images(
+                        mainPost: threadPage.mainPost,
+                        posts: threadPage.posts
+                    )
+                )
+                hasMore = threadPage.hasMore
+                page += 1
+                if collected.count >= ThreadImageGalleryLoadPolicy.maximumImages {
+                    break
+                }
+            }
+        } catch {
+        }
+
+        if collected.isEmpty {
+            return fallback.map { image in
+                if image.sourcePostID != nil { return image }
+                if let firstPostID {
+                    return image.tagged(postID: firstPostID, floor: 1)
+                }
+                return image
+            }
+        }
+        return collected
+    }
 }
 
 @MainActor
@@ -2279,10 +2363,24 @@ final class ImagePreviewCoordinator {
 
     private let arbiter = MediaPreviewPresentationArbiter.shared
     private var activeController: ImagePreviewHostingController?
+    private var activeGallery: ImagePreviewGalleryModel?
     private var activeContextThreadID: Int64?
     private var activeContextForumID: Int64?
 
     private init() {}
+
+    func expandActiveGallery(
+        images: [ImageContent],
+        focus: ImageContent?,
+        sessionID: UUID
+    ) {
+        guard let gallery = activeGallery,
+              gallery.sessionID == sessionID,
+              activeController?.session.id == sessionID else {
+            return
+        }
+        _ = gallery.expand(images: images, focus: focus)
+    }
 
     func jumpToPostAfterDismiss(_ postID: UInt64) {
         guard postID > 0 else { return }
@@ -2354,9 +2452,12 @@ final class ImagePreviewCoordinator {
             initialImage: session.sourceImage
         )
         let dismissRelay = ImagePreviewDismissRelay()
+        let gallery = ImagePreviewGalleryModel(session: session)
+        activeGallery = gallery
         let viewer = FullScreenImageView(
             session: session,
             transitionState: transitionState,
+            gallery: gallery,
             saveAction: saveAction,
             onRequestDismiss: {
                 dismissRelay.dismiss()
@@ -2444,6 +2545,9 @@ final class ImagePreviewCoordinator {
         if activeController?.session.id == sessionID {
             activeController = nil
         }
+        if activeGallery?.sessionID == sessionID {
+            activeGallery = nil
+        }
         activeContextThreadID = nil
         activeContextForumID = nil
 #if DEBUG
@@ -2467,6 +2571,9 @@ final class ImagePreviewCoordinator {
         }
         if activeController?.session.id == sessionID {
             activeController = nil
+        }
+        if activeGallery?.sessionID == sessionID {
+            activeGallery = nil
         }
         activeContextThreadID = nil
         activeContextForumID = nil
@@ -3893,8 +4000,77 @@ private final class FullScreenZoomImageController: UIViewController,
     }
 }
 
+
+@MainActor
+final class ImagePreviewGalleryModel: ObservableObject {
+    let sessionID: UUID
+    @Published private(set) var items: [FullScreenImageItem]
+    @Published var currentIndex: Int
+
+    init(session: ImagePreviewSession) {
+        sessionID = session.id
+        let resolved = session.images.enumerated().map { index, image in
+            FullScreenImageItem(
+                image: image,
+                index: index,
+                placeholderImage: index == session.initialIndex ? session.sourceImage : nil
+            )
+        }
+        items = resolved
+        currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+            session.initialIndex,
+            totalCount: max(resolved.count, 1)
+        )
+    }
+
+    init(items: [FullScreenImageItem], currentIndex: Int = 0, sessionID: UUID = UUID()) {
+        self.sessionID = sessionID
+        self.items = items
+        self.currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+            currentIndex,
+            totalCount: max(items.count, 1)
+        )
+    }
+
+    @discardableResult
+    func expand(images: [ImageContent], focus: ImageContent?) -> Bool {
+        guard images.isEmpty == false else { return false }
+        let focusURL = focus?.originalURL ?? focus?.thumbnailURL
+        let current = items.indices.contains(currentIndex) ? items[currentIndex] : nil
+        let currentURL = current?.originalURL ?? current?.primaryURL
+
+        let newItems = images.enumerated().map { index, image in
+            FullScreenImageItem(image: image, index: index)
+        }
+        let shouldReplace = newItems.count > items.count
+            || newItems.contains(where: { ($0.sourceFloor ?? 1) > 1 })
+        guard shouldReplace else { return false }
+
+        let matchedIndex = newItems.firstIndex { item in
+            if let focusURL {
+                return item.originalURL == focusURL || item.primaryURL == focusURL
+            }
+            if let currentURL {
+                return item.originalURL == currentURL || item.primaryURL == currentURL
+            }
+            return false
+        }
+
+        items = newItems
+        if let matchedIndex {
+            currentIndex = matchedIndex
+        } else {
+            currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+                currentIndex,
+                totalCount: newItems.count
+            )
+        }
+        return true
+    }
+}
+
 struct FullScreenImageView: View {
-    private let items: [FullScreenImageItem]
+    @ObservedObject private var gallery: ImagePreviewGalleryModel
     private let saveAction: (URL) async throws -> Void
     private let onRequestDismiss: (() -> Void)?
     private let onCurrentIndexChange: ((Int) -> Void)?
@@ -3902,7 +4078,12 @@ struct FullScreenImageView: View {
     private let onZoomStateChange: ((Int, Bool) -> Void)?
     private let transitionState: ImagePreviewPresentationState
     private let prefetchesAdjacentPages: Bool
-    @State private var currentIndex: Int
+
+    private var items: [FullScreenImageItem] { gallery.items }
+    private var currentIndex: Int {
+        get { gallery.currentIndex }
+        nonmutating set { gallery.currentIndex = newValue }
+    }
     @State private var originalLoadStates: [String: FullScreenOriginalImageLoadState]
     @State private var originalLoadRequests: [String: Int]
     @State private var originalLoadProgresses: [String: BoundedURLSessionProgress] = [:]
@@ -3925,7 +4106,7 @@ struct FullScreenImageView: View {
         let item = FullScreenImageItem(url: url, index: 0)
         let transitionState = ImagePreviewPresentationState(initialIndex: 0)
         transitionState.markPresentationFinished()
-        items = [item]
+        gallery = ImagePreviewGalleryModel(items: [item], currentIndex: 0)
         self.saveAction = saveAction
         self.onRequestDismiss = onRequestDismiss
         self.onCurrentIndexChange = onCurrentIndexChange
@@ -3933,7 +4114,6 @@ struct FullScreenImageView: View {
         onZoomStateChange = nil
         self.transitionState = transitionState
         prefetchesAdjacentPages = true
-        _currentIndex = State(initialValue: 0)
         _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: [item]))
         _originalLoadRequests = State(initialValue: [:])
     }
@@ -3941,23 +4121,32 @@ struct FullScreenImageView: View {
     init(
         session: ImagePreviewSession,
         transitionState: ImagePreviewPresentationState,
+        gallery: ImagePreviewGalleryModel? = nil,
         saveAction: @escaping (URL) async throws -> Void = FullScreenImageView.liveSave,
         onRequestDismiss: (() -> Void)? = nil,
         onCurrentIndexChange: ((Int) -> Void)? = nil,
         onCurrentImageResolved: ((Int, UIImage, CGRect?) -> Void)? = nil,
         onZoomStateChange: ((Int, Bool) -> Void)? = nil
     ) {
-        let resolvedItems = session.images.enumerated().map { index, image in
-            FullScreenImageItem(
-                image: image,
-                index: index,
-                placeholderImage: index == session.initialIndex ? session.sourceImage : nil
+        if let gallery {
+            self.gallery = gallery
+        } else {
+            let resolvedItems = session.images.enumerated().map { index, image in
+                FullScreenImageItem(
+                    image: image,
+                    index: index,
+                    placeholderImage: index == session.initialIndex ? session.sourceImage : nil
+                )
+            }
+            let finalItems = resolvedItems.isEmpty
+                ? [FullScreenImageItem(url: nil, index: 0)]
+                : resolvedItems
+            self.gallery = ImagePreviewGalleryModel(
+                items: finalItems,
+                currentIndex: session.initialIndex,
+                sessionID: session.id
             )
         }
-        let finalItems = resolvedItems.isEmpty
-            ? [FullScreenImageItem(url: nil, index: 0)]
-            : resolvedItems
-        items = finalItems
         self.saveAction = saveAction
         self.onRequestDismiss = onRequestDismiss
         self.onCurrentIndexChange = onCurrentIndexChange
@@ -3965,10 +4154,6 @@ struct FullScreenImageView: View {
         self.onZoomStateChange = onZoomStateChange
         self.transitionState = transitionState
         prefetchesAdjacentPages = session.prefetchesAdjacentPages
-        _currentIndex = State(initialValue: ImagePreviewIndexPolicy.clampedIndex(
-            session.initialIndex,
-            totalCount: resolvedItems.count
-        ))
         _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: finalItems))
         _originalLoadRequests = State(initialValue: [:])
     }
@@ -3993,7 +4178,7 @@ struct FullScreenImageView: View {
         let finalItems = resolvedItems.isEmpty
             ? [FullScreenImageItem(url: nil, index: 0)]
             : resolvedItems
-        items = finalItems
+        gallery = ImagePreviewGalleryModel(items: finalItems, currentIndex: initialIndex)
         self.saveAction = saveAction
         self.onRequestDismiss = onRequestDismiss
         self.onCurrentIndexChange = onCurrentIndexChange
@@ -4001,7 +4186,6 @@ struct FullScreenImageView: View {
         onZoomStateChange = nil
         self.transitionState = transitionState
         prefetchesAdjacentPages = true
-        _currentIndex = State(initialValue: initialIndex)
         _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: finalItems))
         _originalLoadRequests = State(initialValue: [:])
     }
@@ -4024,7 +4208,7 @@ struct FullScreenImageView: View {
                     zoomableImage(item, index: 0)
                         .ignoresSafeArea()
                 } else {
-                    TabView(selection: $currentIndex) {
+                    TabView(selection: $gallery.currentIndex) {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             zoomableImage(item, index: index)
                                 .ignoresSafeArea()
@@ -4084,6 +4268,15 @@ struct FullScreenImageView: View {
         .compatibleOnChange(of: currentIndex) { _, index in
             transitionState.setCurrentIndex(index)
             onCurrentIndexChange?(index)
+        }
+        .onReceive(gallery.$items) { newItems in
+            var states = originalLoadStates
+            for item in newItems where states[item.id] == nil {
+                states[item.id] = item.originalURL == nil ? .unavailable : .available
+            }
+            originalLoadStates = states
+            transitionState.setCurrentIndex(currentIndex)
+            onCurrentIndexChange?(currentIndex)
         }
     }
 
