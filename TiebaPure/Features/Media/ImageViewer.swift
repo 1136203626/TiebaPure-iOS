@@ -2229,11 +2229,6 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
 }
 
 
-enum ThreadImageGalleryLoadPolicy {
-    static let maximumPages = 5
-    static let maximumImages = 120
-}
-
 enum ThreadImagePreviewPresenter {
     @MainActor
     static func presentFromFeed(
@@ -2247,108 +2242,35 @@ enum ThreadImagePreviewPresenter {
         sourceAnchor: ImagePreviewSourceAnchor?,
         prefetchesAdjacentPages: Bool
     ) {
-        let fallback = summaryImages
+        // 列表点图必须立刻打开：不要先等 threadPage 拉全帖图廊（会卡约 1s）。
+        // 全帖左右滑在帖子详情内完成；列表侧保留跳转楼层上下文。
+        let gallery = summaryImages.map { image in
+            if image.sourcePostID != nil { return image }
+            if let firstPostID = thread.firstPostID {
+                return image.tagged(postID: firstPostID, floor: 1)
+            }
+            return image
+        }
         let startIndex = ImagePreviewIndexPolicy.clampedIndex(
             initialIndex,
-            totalCount: max(fallback.count, 1)
+            totalCount: max(gallery.count, 1)
         )
-        let startImage = fallback.indices.contains(startIndex) ? fallback[startIndex] : fallback.first
 
-        Task {
-            let gallery = await loadGallery(
-                threadID: thread.id,
-                forumID: thread.forumID,
-                account: account,
-                api: api,
-                fallback: fallback,
-                firstPostID: thread.firstPostID
+        ImagePreviewCoordinator.shared.present(
+            ImagePreviewSession(
+                images: gallery.isEmpty ? summaryImages : gallery,
+                initialIndex: startIndex,
+                sourceFrame: sourceFrame,
+                sourceImage: sourceImage,
+                sourceAnchor: sourceAnchor,
+                prefetchesAdjacentPages: prefetchesAdjacentPages,
+                contextThreadID: thread.id,
+                contextForumID: thread.forumID
             )
-            let index: Int
-            if let startImage {
-                index = ThreadImageGalleryBuilder.index(
-                    of: startImage,
-                    in: gallery,
-                    fallbackLocalIndex: startIndex
-                )
-            } else {
-                index = ImagePreviewIndexPolicy.clampedIndex(startIndex, totalCount: gallery.count)
-            }
-
-            ImagePreviewCoordinator.shared.present(
-                ImagePreviewSession(
-                    images: gallery,
-                    initialIndex: index,
-                    sourceFrame: sourceFrame,
-                    sourceImage: sourceImage,
-                    sourceAnchor: sourceAnchor,
-                    prefetchesAdjacentPages: prefetchesAdjacentPages,
-                    contextThreadID: thread.id,
-                    contextForumID: thread.forumID
-                )
-            )
-        }
+        )
     }
 
-    @MainActor
-    private static func loadGallery(
-        threadID: Int64,
-        forumID: Int64?,
-        account: Account?,
-        api: any TiebaAPIService,
-        fallback: [ImageContent],
-        firstPostID: UInt64?
-    ) async -> [ImageContent] {
-        var collected: [ImageContent] = []
-        var seen = Set<String>()
 
-        func appendUnique(_ images: [ImageContent]) {
-            for image in images {
-                let key = (image.originalURL ?? image.thumbnailURL)?.absoluteString
-                    ?? "\(image.width)x\(image.height)-\(image.sourcePostID ?? 0)"
-                guard seen.insert(key).inserted else { continue }
-                collected.append(image)
-            }
-        }
-
-        do {
-            var page = 1
-            var hasMore = true
-            while hasMore && page <= ThreadImageGalleryLoadPolicy.maximumPages {
-                let threadPage = try await api.threadPage(
-                    account: account,
-                    threadID: threadID,
-                    page: page,
-                    forumID: forumID,
-                    postID: nil,
-                    seeLz: false,
-                    sortType: .ascending
-                )
-                appendUnique(
-                    ThreadImageGalleryBuilder.images(
-                        mainPost: threadPage.mainPost,
-                        posts: threadPage.posts
-                    )
-                )
-                hasMore = threadPage.hasMore
-                page += 1
-                if collected.count >= ThreadImageGalleryLoadPolicy.maximumImages {
-                    break
-                }
-            }
-        } catch {
-        }
-
-        if collected.isEmpty {
-            return fallback.map { image in
-                if image.sourcePostID != nil { return image }
-                if let firstPostID {
-                    return image.tagged(postID: firstPostID, floor: 1)
-                }
-                return image
-            }
-        }
-        return collected
-    }
 }
 
 @MainActor
