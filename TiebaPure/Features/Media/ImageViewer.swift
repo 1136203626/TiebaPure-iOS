@@ -316,6 +316,44 @@ enum InlineImageLayoutPolicy {
     }
 }
 
+
+/// 转场/缩略图只用静帧。动图（GIF）若直接拿 `UIImage.images` 参与 hero，
+/// 关闭后容易出现窗口级触摸被挡住、首页无法滑动，切后台再回才恢复。
+
+enum MediaPreviewTouchDeliveryReset {
+    @MainActor
+    static func run() {
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+        guard let window = windows.first(where: { $0.isKeyWindow }) else { return }
+        let wasEnabled = window.isUserInteractionEnabled
+        window.isUserInteractionEnabled = false
+        window.isUserInteractionEnabled = wasEnabled
+    }
+}
+
+enum FullScreenImageStillFrame {
+    static func image(from image: UIImage?) -> UIImage? {
+        guard let image else { return nil }
+        if let frames = image.images, let first = frames.first {
+            let size = first.size
+            let format = UIGraphicsImageRendererFormat.preferred()
+            format.scale = first.scale
+            format.opaque = false
+            let renderer = UIGraphicsImageRenderer(size: size, format: format)
+            return renderer.image { _ in
+                first.draw(in: CGRect(origin: .zero, size: size))
+            }
+        }
+        // 部分动图不会填 images，但 imageAsset / cgImage 仍可用；再兜底一次
+        if image.size.width <= 0 || image.size.height <= 0 {
+            return image
+        }
+        return image
+    }
+}
+
 extension Notification.Name {
     static let tiebaJumpToThreadPost = Notification.Name("tiebaJumpToThreadPost")
 }
@@ -354,7 +392,7 @@ struct ImagePreviewSession: Identifiable {
             totalCount: images.count
         )
         self.sourceFrame = ImagePreviewTransitionGeometry.validSourceFrame(sourceFrame)
-        self.sourceImage = sourceImage
+        self.sourceImage = FullScreenImageStillFrame.image(from: sourceImage)
         self.sourceAnchor = sourceAnchor
         sourceToken = sourceAnchor?.transitionToken
         self.sourceIdentity = sourceIdentity ?? sourceAnchor?.sourceIdentity
@@ -2087,8 +2125,9 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
         let currentIndex = transitionState.currentIndex
         guard currentIndex == session.initialIndex,
               transitionState.allowsInteractiveDismissal,
-              let image = transitionContent.image(at: currentIndex)
-                ?? sourceView.image else {
+              let image = FullScreenImageStillFrame.image(
+                from: transitionContent.image(at: currentIndex) ?? sourceView.image
+              ) else {
             return nil
         }
         let frame = transitionContent.frame(
@@ -2342,7 +2381,11 @@ final class ImagePreviewCoordinator {
             controller.beginDismissalIfNeeded()
             controller.dismiss(animated: ImagePreviewTransitionMotionPolicy.animationsEnabled) {
                 controller.finishDismissalIfNeeded()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: post)
+                MediaPreviewTouchDeliveryReset.run()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    MediaPreviewTouchDeliveryReset.run()
+                    post()
+                }
             }
         } else {
             post()
@@ -2479,10 +2522,17 @@ final class ImagePreviewCoordinator {
         if activeController?.session.id == sessionID {
             activeController = nil
         }
+        activeContextThreadID = nil
+        activeContextForumID = nil
 #if DEBUG
         ImageDismissScrollRaceProbe.shared.dismissalDidFinish(sessionID: sessionID)
 #endif
         _ = arbiter.dismissalDidFinish(request)
+        MediaPreviewTouchDeliveryReset.run()
+        // GIF hero 关闭后偶发第一帧仍吃掉触摸，下一 runloop 再敲一次窗口交互开关。
+        DispatchQueue.main.async {
+            MediaPreviewTouchDeliveryReset.run()
+        }
     }
 
     private func cancelPresentation(
@@ -2496,6 +2546,9 @@ final class ImagePreviewCoordinator {
         if activeController?.session.id == sessionID {
             activeController = nil
         }
+        activeContextThreadID = nil
+        activeContextForumID = nil
+        MediaPreviewTouchDeliveryReset.run()
     }
 
     private func cancelDismissal(
@@ -2504,6 +2557,7 @@ final class ImagePreviewCoordinator {
     ) {
         guard sessionID == request.id else { return }
         _ = arbiter.dismissalDidCancel(request)
+        MediaPreviewTouchDeliveryReset.run()
     }
 
     static func topPresenter() -> UIViewController? {
