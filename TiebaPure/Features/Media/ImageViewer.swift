@@ -2337,9 +2337,12 @@ final class ImagePreviewCoordinator {
                 userInfo: info
             )
         }
+        // 必须走 begin/finishDismissal，否则仲裁器会一直占着，之后再也打不开图片。
         if let controller = activeController {
-            controller.dismiss(animated: true) {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: post)
+            controller.beginDismissalIfNeeded()
+            controller.dismiss(animated: ImagePreviewTransitionMotionPolicy.animationsEnabled) {
+                controller.finishDismissalIfNeeded()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: post)
             }
         } else {
             post()
@@ -4180,10 +4183,6 @@ struct FullScreenImageView: View {
             }
         )
         .contentShape(Rectangle())
-        .onLongPressGesture {
-            guard currentImageSourcePostID != nil else { return }
-            showsJumpToFloorDialog = true
-        }
     }
 
     private var bottomBar: some View {
@@ -4218,6 +4217,7 @@ struct FullScreenImageView: View {
 
             Spacer(minLength: 0)
 
+            jumpToFloorButton
             viewOriginalButton
             downloadButton
         }
@@ -4231,6 +4231,8 @@ struct FullScreenImageView: View {
                     Spacer(minLength: 0)
                 }
             }
+            jumpToFloorButton
+                .frame(maxWidth: .infinity)
             viewOriginalButton
                 .frame(maxWidth: .infinity)
             downloadButton
@@ -4243,6 +4245,29 @@ struct FullScreenImageView: View {
             .font(.footnote.monospacedDigit().weight(.semibold))
             .accessibilityIdentifier("image-page-indicator")
             .accessibilityLabel("第\(currentIndex + 1)张，共\(items.count)张")
+    }
+
+    @ViewBuilder
+    private var jumpToFloorButton: some View {
+        if currentImageSourcePostID != nil {
+            Button {
+                showsJumpToFloorDialog = true
+            } label: {
+                Text(currentImageSourceFloor.map { floor in "跳转第\(floor)楼" } ?? "跳转楼层")
+                    .font((dynamicTypeSize.isAccessibilitySize
+                        ? Font.body
+                        : Font.footnote).weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8)
+                    .frame(
+                        maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil,
+                        minHeight: dynamicTypeSize.isAccessibilitySize ? 52 : 34
+                    )
+                    .background(.white.opacity(0.18), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("跳转到图片所在楼层")
+        }
     }
 
     private var viewOriginalButton: some View {
