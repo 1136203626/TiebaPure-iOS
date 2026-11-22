@@ -77,28 +77,10 @@ struct HomeView: View {
         } message: {
             Text(likeActionError ?? "")
         }
-        .onReceive(NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost)) { note in
-            guard let postID = note.userInfo?["postID"] as? UInt64, postID > 0,
-                  let threadID = note.userInfo?["threadID"] as? Int64 else { return }
-            // 详情页自己处理当前帖；列表只负责从首页打开目标帖
-            if navigationPath.contains(where: {
-                if case let .thread(route) = $0 { return route.threadID == threadID }
-                return false
-            }) || splitDetailPath.contains(where: { $0.threadID == threadID }) {
-                return
-            }
-            let forumID = note.userInfo?["forumID"] as? Int64
-            let route = ReaderSplitThreadRoute(
-                threadID: threadID,
-                forumID: forumID,
-                initialPostID: postID
-            )
-            if usesSplitDetailLayout {
-                openThreadInSplitDetail(route)
-            } else {
-                openThreadInCompactStack(route)
-            }
-        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost),
+            perform: handleJumpToThreadPost
+        )
     }
 
     private var feedColumn: some View {
@@ -274,6 +256,28 @@ struct HomeView: View {
             route,
             from: navigationPath
         )
+    }
+
+    private func handleJumpToThreadPost(_ note: Notification) {
+        guard let postID = note.userInfo?["postID"] as? UInt64, postID > 0,
+              let threadID = note.userInfo?["threadID"] as? Int64 else { return }
+        if navigationPath.contains(where: {
+            if case let .thread(route) = $0 { return route.threadID == threadID }
+            return false
+        }) || splitDetailPath.contains(where: { $0.threadID == threadID }) {
+            return
+        }
+        let forumID = note.userInfo?["forumID"] as? Int64
+        let route = ReaderSplitThreadRoute(
+            threadID: threadID,
+            forumID: forumID,
+            initialPostID: postID
+        )
+        if usesSplitDetailLayout {
+            openThreadInSplitDetail(route)
+        } else {
+            openThreadInCompactStack(route)
+        }
     }
 
     private func openThread(
