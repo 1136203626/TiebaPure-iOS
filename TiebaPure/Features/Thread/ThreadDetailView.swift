@@ -342,6 +342,16 @@ struct ThreadDetailView: View {
             .toolbar(.hidden, for: .tabBar)
             .onAppear(perform: handleAppear)
             .onDisappear(perform: handleDisappear)
+            .onReceive(NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost)) { note in
+                guard isPageVisible,
+                      let postID = note.userInfo?["postID"] as? UInt64,
+                      postID > 0 else { return }
+                if let noteThreadID = note.userInfo?["threadID"] as? Int64,
+                   noteThreadID != threadID {
+                    return
+                }
+                requestScroll(to: postID)
+            }
     }
 
     private var threadNavigationTitle: String {
@@ -575,7 +585,10 @@ struct ThreadDetailView: View {
                         : nil,
                     onReply: contentSubmissionSettingsStore.repliesEnabled && mainPost.id > 0
                         ? { openReplyComposer(for: mainPost) }
-                        : nil
+                        : nil,
+                    threadGalleryImages: threadGalleryImages,
+                    contextThreadID: threadID,
+                    contextForumID: forumID
                 )
                 .equatable()
                 .padding(.bottom, TiebaPureTheme.Spacing.xs)
@@ -648,7 +661,10 @@ struct ThreadDetailView: View {
                         : nil,
                     onReply: contentSubmissionSettingsStore.repliesEnabled
                         ? { openReplyComposer(for: post) }
-                        : nil
+                        : nil,
+                    threadGalleryImages: threadGalleryImages,
+                    contextThreadID: threadID,
+                    contextForumID: forumID
                 )
                 .equatable()
                 .threadPreciseScrollAnchor(
@@ -1310,6 +1326,10 @@ struct ThreadDetailView: View {
 
     private var mainPost: Post? {
         threadPage?.mainPost ?? posts.first { $0.floor == 1 }
+    }
+
+    private var threadGalleryImages: [ImageContent] {
+        ThreadImageGalleryBuilder.images(mainPost: mainPost, posts: posts)
     }
 
     private var resolvedOwnThreadDeletionTarget: OwnThreadDeletionTarget? {

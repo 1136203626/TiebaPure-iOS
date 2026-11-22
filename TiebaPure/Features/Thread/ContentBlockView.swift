@@ -36,6 +36,10 @@ struct ContentBlocksView: View {
     var inlineAccessibilityIdentifier: String?
     var onOpenUser: ((UserSummary) -> Void)?
     var onPlainTextTap: (() -> Void)?
+    /// 全帖图片画廊；为 nil 时仍只在当前楼层内滑动。
+    var threadGalleryImages: [ImageContent]? = nil
+    var contextThreadID: Int64? = nil
+    var contextForumID: Int64? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: TiebaPureTheme.Spacing.sm) {
@@ -101,7 +105,12 @@ struct ContentBlocksView: View {
                         .fixedSize(horizontal: false, vertical: true)
                     }
                 case let .media(mediaBlocks):
-                    MediaBlocksView(blocks: mediaBlocks)
+                    MediaBlocksView(
+                        blocks: mediaBlocks,
+                        threadGalleryImages: threadGalleryImages,
+                        contextThreadID: contextThreadID,
+                        contextForumID: contextForumID
+                    )
                 case let .voice(voice):
                     if ThreadContentDisplayPolicy.maximumNumberOfLines(for: lineLimit) == 0 {
                         VoicePlaybackControl(voice: voice)
@@ -1751,6 +1760,9 @@ private struct InlineContentGroup: Identifiable {
 
 private struct MediaBlocksView: View {
     let blocks: [ContentBlock]
+    var threadGalleryImages: [ImageContent]? = nil
+    var contextThreadID: Int64? = nil
+    var contextForumID: Int64? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: TiebaPureTheme.Spacing.sm) {
@@ -1758,9 +1770,11 @@ private struct MediaBlocksView: View {
                 switch block {
                 case let .image(image):
                     ImageViewer(
-                        image: image,
-                        galleryImages: imageContents,
-                        galleryIndex: imageIndex(for: offset)
+                        image: resolvedImage(image),
+                        galleryImages: galleryImages,
+                        galleryIndex: galleryIndex(for: image, offset: offset),
+                        contextThreadID: contextThreadID,
+                        contextForumID: contextForumID
                     )
                 case let .video(video):
                     VideoPlayerView(video: video)
@@ -1771,7 +1785,7 @@ private struct MediaBlocksView: View {
         }
     }
 
-    private var imageContents: [ImageContent] {
+    private var localImageContents: [ImageContent] {
         blocks.compactMap { block in
             if case let .image(image) = block {
                 return image
@@ -1780,7 +1794,45 @@ private struct MediaBlocksView: View {
         }
     }
 
-    private func imageIndex(for offset: Int) -> Int {
+    private var galleryImages: [ImageContent] {
+        if let threadGalleryImages, threadGalleryImages.isEmpty == false {
+            return threadGalleryImages
+        }
+        return localImageContents
+    }
+
+    private func resolvedImage(_ image: ImageContent) -> ImageContent {
+        if image.sourcePostID != nil {
+            return image
+        }
+        // 尽量从全帖画廊取带楼层标记的同一张图
+        if let threadGalleryImages {
+            let idx = ThreadImageGalleryBuilder.index(
+                of: image,
+                in: threadGalleryImages,
+                fallbackLocalIndex: 0
+            )
+            if threadGalleryImages.indices.contains(idx),
+               threadGalleryImages[idx].sourcePostID != nil {
+                return threadGalleryImages[idx]
+            }
+        }
+        return image
+    }
+
+    private func galleryIndex(for image: ImageContent, offset: Int) -> Int {
+        let local = localIndex(for: offset)
+        if let threadGalleryImages, threadGalleryImages.isEmpty == false {
+            return ThreadImageGalleryBuilder.index(
+                of: image,
+                in: threadGalleryImages,
+                fallbackLocalIndex: local
+            )
+        }
+        return local
+    }
+
+    private func localIndex(for offset: Int) -> Int {
         blocks.prefix(offset).reduce(0) { count, block in
             if case .image = block {
                 return count + 1

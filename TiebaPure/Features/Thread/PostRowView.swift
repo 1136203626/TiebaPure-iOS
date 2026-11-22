@@ -12,6 +12,9 @@ struct PostRowView: View {
     let isLikeUpdating: Bool
     let onToggleLike: (() -> Void)?
     let onReply: (() -> Void)?
+    let threadGalleryImages: [ImageContent]?
+    let contextThreadID: Int64?
+    let contextForumID: Int64?
 
     init(
         post: Post,
@@ -22,7 +25,10 @@ struct PostRowView: View {
         onOpenUser: ((UserSummary) -> Void)? = nil,
         isLikeUpdating: Bool = false,
         onToggleLike: (() -> Void)? = nil,
-        onReply: (() -> Void)? = nil
+        onReply: (() -> Void)? = nil,
+        threadGalleryImages: [ImageContent]? = nil,
+        contextThreadID: Int64? = nil,
+        contextForumID: Int64? = nil
     ) {
         self.post = post
         self.threadTitle = threadTitle
@@ -33,6 +39,9 @@ struct PostRowView: View {
         self.isLikeUpdating = isLikeUpdating
         self.onToggleLike = onToggleLike
         self.onReply = onReply
+        self.threadGalleryImages = threadGalleryImages
+        self.contextThreadID = contextThreadID
+        self.contextForumID = contextForumID
     }
 
     var body: some View {
@@ -92,7 +101,10 @@ struct PostRowView: View {
                         inlineAccessibilityIdentifier: isMainPost
                             ? "thread-main-text"
                             : "thread-reply-text",
-                        onPlainTextTap: onReply
+                        onPlainTextTap: onReply,
+                        threadGalleryImages: threadGalleryImages,
+                        contextThreadID: contextThreadID,
+                        contextForumID: contextForumID
                     )
 
                     ThreadPostMetadataView(
@@ -141,6 +153,7 @@ extension PostRowView: Equatable {
             && (lhs.onOpenUser != nil) == (rhs.onOpenUser != nil)
             && (lhs.onToggleLike != nil) == (rhs.onToggleLike != nil)
             && (lhs.onReply != nil) == (rhs.onReply != nil)
+            && lhs.threadGalleryImages?.count == rhs.threadGalleryImages?.count
     }
 }
 
