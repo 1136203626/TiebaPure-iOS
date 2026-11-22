@@ -72,6 +72,13 @@ struct ForumThreadsView: View {
         }
         .navigationTitle(forum.displayName)
         .navigationBarTitleDisplayMode(.inline)
+        .onReceive(NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost)) { note in
+            guard let postID = note.userInfo?["postID"] as? UInt64, postID > 0,
+                  let threadID = note.userInfo?["threadID"] as? Int64 else { return }
+            if activeThread?.threadID == threadID { return }
+            let forumID = note.userInfo?["forumID"] as? Int64 ?? forum.id
+            openThread(threadID: threadID, forumID: forumID, initialPostID: postID)
+        }
         .navigationDestination(isPresented: searchIsActive) {
             if let activeSearch {
                 SearchResultsView(account: account, scope: activeSearch.scope, initialKeyword: activeSearch.keyword)
@@ -85,7 +92,8 @@ struct ForumThreadsView: View {
                 ThreadDetailView(
                     account: account,
                     threadID: activeThread.threadID,
-                    forumID: activeThread.forumID
+                    forumID: activeThread.forumID,
+                    initialPostID: activeThread.initialPostID
                 )
                 .interactiveNavigationPopStateSync {
                     self.activeThread = nil
@@ -570,7 +578,7 @@ struct ForumThreadsView: View {
         )
     }
 
-    private func openThread(threadID: Int64, forumID: Int64?) {
+    private func openThread(threadID: Int64, forumID: Int64?, initialPostID: UInt64? = nil) {
         // Explicit ownership from the parent is authoritative. SwiftUI does
         // not reliably carry custom environment values across a
         // `navigationDestination` boundary, so Home/ForumHub pass this
@@ -586,10 +594,20 @@ struct ForumThreadsView: View {
             if isReaderSplitListColumn == false {
                 navigationSourceLifecycle.beginParentNavigation()
             }
-            parentAction(ReaderSplitThreadRoute(threadID: threadID, forumID: forumID))
+            parentAction(
+                ReaderSplitThreadRoute(
+                    threadID: threadID,
+                    forumID: forumID,
+                    initialPostID: initialPostID
+                )
+            )
             return
         }
-        activeThread = ForumThreadRoute(threadID: threadID, forumID: forumID)
+        activeThread = ForumThreadRoute(
+            threadID: threadID,
+            forumID: forumID,
+            initialPostID: initialPostID
+        )
     }
 
     private func reload() async {
@@ -789,15 +807,16 @@ struct ForumThreadsView: View {
     ) {
         switch HomeMediaActionPolicy.action(for: item, in: mediaItems) {
         case let .previewImages(images, index):
-            ImagePreviewCoordinator.shared.present(
-                ImagePreviewSession(
-                    images: images,
-                    initialIndex: index,
-                    sourceFrame: sourceFrame,
-                    sourceImage: sourceImage,
-                    sourceAnchor: sourceAnchor,
-                    prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual
-                )
+            ThreadImagePreviewPresenter.presentFromFeed(
+                thread: fallbackThread,
+                summaryImages: images,
+                initialIndex: index,
+                account: account,
+                api: environment.api,
+                sourceFrame: sourceFrame,
+                sourceImage: sourceImage,
+                sourceAnchor: sourceAnchor,
+                prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual
             )
         case let .playVideo(video):
             VideoPreviewCoordinator.shared.present(
@@ -991,6 +1010,13 @@ enum ForumThreadsOpenRoutingPolicy {
 private struct ForumThreadRoute {
     let threadID: Int64
     let forumID: Int64?
+    let initialPostID: UInt64?
+
+    init(threadID: Int64, forumID: Int64?, initialPostID: UInt64? = nil) {
+        self.threadID = threadID
+        self.forumID = forumID
+        self.initialPostID = initialPostID
+    }
 }
 
 struct ForumSearchLaunchRoute: Equatable {
