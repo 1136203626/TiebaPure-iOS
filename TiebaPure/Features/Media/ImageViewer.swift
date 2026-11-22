@@ -9,6 +9,8 @@ struct ImageViewer: View {
     let image: ImageContent
     let galleryImages: [ImageContent]
     let galleryIndex: Int
+    let contextThreadID: Int64?
+    let contextForumID: Int64?
 
     @State private var inlineLoadState: TiebaRemoteImageLoadState = .empty
     @State private var inlineRetryTrigger = 0
@@ -20,11 +22,15 @@ struct ImageViewer: View {
     init(
         image: ImageContent,
         galleryImages: [ImageContent]? = nil,
-        galleryIndex: Int = 0
+        galleryIndex: Int = 0,
+        contextThreadID: Int64? = nil,
+        contextForumID: Int64? = nil
     ) {
         self.image = image
         self.galleryImages = galleryImages ?? [image]
         self.galleryIndex = galleryIndex
+        self.contextThreadID = contextThreadID
+        self.contextForumID = contextForumID
         let identity = Self.sourceIdentity(for: image)
         previewSourceIdentity = identity
         _previewSource = StateObject(
@@ -97,7 +103,9 @@ struct ImageViewer: View {
                     sourceImage: previewSource.image,
                     sourceAnchor: previewSource,
                     sourceIdentity: previewSourceIdentity,
-                    prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual
+                    prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual,
+                    contextThreadID: contextThreadID,
+                    contextForumID: contextForumID
                 )
             )
         }
@@ -321,6 +329,9 @@ struct ImagePreviewSession: Identifiable {
     /// view reference, so cell recycling cannot redirect it to another post.
     let sourceIdentity: String?
     let prefetchesAdjacentPages: Bool
+    /// 列表预览时记录所属帖子，便于「跳转楼层」打开帖子详情。
+    let contextThreadID: Int64?
+    let contextForumID: Int64?
 
     @MainActor
     init(
@@ -330,7 +341,9 @@ struct ImagePreviewSession: Identifiable {
         sourceImage: UIImage? = nil,
         sourceAnchor: ImagePreviewSourceAnchor? = nil,
         sourceIdentity: String? = nil,
-        prefetchesAdjacentPages: Bool = true
+        prefetchesAdjacentPages: Bool = true,
+        contextThreadID: Int64? = nil,
+        contextForumID: Int64? = nil
     ) {
         self.images = images
         self.initialIndex = ImagePreviewIndexPolicy.clampedIndex(
@@ -343,6 +356,8 @@ struct ImagePreviewSession: Identifiable {
         sourceToken = sourceAnchor?.transitionToken
         self.sourceIdentity = sourceIdentity ?? sourceAnchor?.sourceIdentity
         self.prefetchesAdjacentPages = prefetchesAdjacentPages
+        self.contextThreadID = contextThreadID
+        self.contextForumID = contextForumID
     }
 }
 
@@ -2229,13 +2244,156 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
 }
 
 @MainActor
+
+enum ThreadImageGalleryLoadPolicy {
+    static let maximumPages = 5
+    static let maximumImages = 120
+}
+
+enum ThreadImagePreviewPresenter {
+    /// 首页 / 吧内列表点图：先尽量拉帖子分页拼全帖图廊，失败则回退摘要图。
+    @MainActor
+    static func presentFromFeed(
+        thread: ThreadSummary,
+        summaryImages: [ImageContent],
+        initialIndex: Int,
+        account: Account?,
+        api: any TiebaAPIService,
+        sourceFrame: CGRect?,
+        sourceImage: UIImage?,
+        sourceAnchor: ImagePreviewSourceAnchor?,
+        prefetchesAdjacentPages: Bool
+    ) {
+        let fallback = summaryImages.isEmpty == false
+            ? summaryImages
+            : summaryImages
+        let startIndex = ImagePreviewIndexPolicy.clampedIndex(
+            initialIndex,
+            totalCount: max(fallback.count, 1)
+        )
+        let startImage = fallback.indices.contains(startIndex) ? fallback[startIndex] : fallback.first
+
+        Task {
+            let gallery = await loadGallery(
+                threadID: thread.id,
+                forumID: thread.forumID,
+                account: account,
+                api: api,
+                fallback: fallback,
+                firstPostID: thread.firstPostID
+            )
+            let index: Int = {
+                if let startImage {
+                    return ThreadImageGalleryBuilder.index(
+                        of: startImage,
+                        in: gallery,
+                        fallbackLocalIndex: startIndex
+                    )
+                }
+                return ImagePreviewIndexPolicy.clampedIndex(startIndex, totalCount: gallery.count)
+            }()
+
+            ImagePreviewCoordinator.shared.present(
+                ImagePreviewSession(
+                    images: gallery,
+                    initialIndex: index,
+                    sourceFrame: sourceFrame,
+                    sourceImage: sourceImage,
+                    sourceAnchor: sourceAnchor,
+                    prefetchesAdjacentPages: prefetchesAdjacentPages,
+                    contextThreadID: thread.id,
+                    contextForumID: thread.forumID
+                )
+            )
+        }
+    }
+
+    @MainActor
+    private static func loadGallery(
+        threadID: Int64,
+        forumID: Int64?,
+        account: Account?,
+        api: any TiebaAPIService,
+        fallback: [ImageContent],
+        firstPostID: UInt64?
+    ) async -> [ImageContent] {
+        var collected: [ImageContent] = []
+        var seen = Set<String>()
+        func appendUnique(_ images: [ImageContent]) {
+            for image in images {
+                let key = (image.originalURL ?? image.thumbnailURL)?.absoluteString
+                    ?? "\(image.width)x\(image.height)-\(image.sourcePostID ?? 0)"
+                guard seen.insert(key).inserted else { continue }
+                collected.append(image)
+            }
+        }
+
+        do {
+            var page = 1
+            var hasMore = true
+            while hasMore && page <= ThreadImageGalleryLoadPolicy.maximumPages {
+                let threadPage = try await api.threadPage(
+                    account: account,
+                    threadID: threadID,
+                    page: page,
+                    forumID: forumID,
+                    postID: nil,
+                    seeLz: false,
+                    sortType: .ascending
+                )
+                appendUnique(
+                    ThreadImageGalleryBuilder.images(
+                        mainPost: threadPage.mainPost,
+                        posts: threadPage.posts
+                    )
+                )
+                hasMore = threadPage.hasMore
+                page += 1
+                if collected.count >= ThreadImageGalleryLoadPolicy.maximumImages {
+                    break
+                }
+            }
+        } catch {
+            // 网络失败时用列表摘要图
+        }
+
+        if collected.isEmpty {
+            return fallback.enumerated().map { index, image in
+                if image.sourcePostID != nil { return image }
+                if let firstPostID {
+                    return image.tagged(postID: firstPostID, floor: 1)
+                }
+                return image
+            }
+        }
+        return collected
+    }
+}
+
 final class ImagePreviewCoordinator {
     static let shared = ImagePreviewCoordinator()
 
     private let arbiter = MediaPreviewPresentationArbiter.shared
     private var activeController: ImagePreviewHostingController?
-
     private init() {}
+
+    func jumpToPostAfterDismiss(_ postID: UInt64) {
+        guard postID > 0 else { return }
+        let post: () -> Void = {
+            NotificationCenter.default.post(
+                name: .tiebaJumpToThreadPost,
+                object: nil,
+                userInfo: ["postID": postID]
+            )
+        }
+        if let controller = activeController {
+            controller.dismiss(animated: true) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: post)
+            }
+        } else {
+            post()
+        }
+    }
 
     @discardableResult
     func present(
@@ -2324,6 +2482,8 @@ final class ImagePreviewCoordinator {
         controller.loadViewIfNeeded()
         controller.view.layoutIfNeeded()
         activeController = controller
+        activeContextThreadID = session.contextThreadID
+        activeContextForumID = session.contextForumID
 
         presenter.present(
             controller,
@@ -2520,6 +2680,8 @@ private struct FullScreenImageItem: Identifiable {
     let downloadURL: URL?
     let imageAspectRatio: CGFloat
     let placeholderImage: UIImage?
+    let sourcePostID: UInt64?
+    let sourceFloor: Int?
 
     init(image: ImageContent, index: Int, placeholderImage: UIImage? = nil) {
         id = "\(index)-\(image.originalURL?.absoluteString ?? image.thumbnailURL?.absoluteString ?? "missing")"
@@ -2533,6 +2695,8 @@ private struct FullScreenImageItem: Identifiable {
         downloadURL = sources.downloadURL
         imageAspectRatio = CGFloat(image.aspectRatio)
         self.placeholderImage = placeholderImage
+        sourcePostID = image.sourcePostID
+        sourceFloor = image.sourceFloor
     }
 
     init(url: URL?, index: Int) {
@@ -2544,6 +2708,8 @@ private struct FullScreenImageItem: Identifiable {
         downloadURL = sources.downloadURL
         imageAspectRatio = 1
         placeholderImage = nil
+        sourcePostID = nil
+        sourceFloor = nil
     }
 }
 
@@ -3844,6 +4010,7 @@ struct FullScreenImageView: View {
     @State private var isDownloading = false
     @State private var downloadTask: Task<Void, Never>?
     @State private var downloadNotice: ImageDownloadNotice?
+    @State private var showsJumpToFloorDialog = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3988,6 +4155,24 @@ struct FullScreenImageView: View {
                 dismissButton: .default(Text("好"))
             )
         }
+        .confirmationDialog(
+            jumpToFloorDialogTitle,
+            isPresented: $showsJumpToFloorDialog,
+            titleVisibility: .visible
+        ) {
+            if let postID = currentImageSourcePostID {
+                Button("跳转到图片所在楼层") {
+                    ImagePreviewCoordinator.shared.jumpToPostAfterDismiss(postID)
+                }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            if let floor = currentImageSourceFloor {
+                Text("该图片来自第 \(floor) 楼")
+            } else {
+                Text("定位到发图所在楼层")
+            }
+        }
         .onDisappear {
             downloadTask?.cancel()
             downloadTask = nil
@@ -4000,6 +4185,23 @@ struct FullScreenImageView: View {
             transitionState.setCurrentIndex(index)
             onCurrentIndexChange?(index)
         }
+    }
+
+    private var currentImageSourcePostID: UInt64? {
+        guard items.indices.contains(currentIndex) else { return nil }
+        return items[currentIndex].sourcePostID
+    }
+
+    private var currentImageSourceFloor: Int? {
+        guard items.indices.contains(currentIndex) else { return nil }
+        return items[currentIndex].sourceFloor
+    }
+
+    private var jumpToFloorDialogTitle: String {
+        if let floor = currentImageSourceFloor {
+            return "第 \(floor) 楼图片"
+        }
+        return "图片操作"
     }
 
     private func close() {
@@ -4057,6 +4259,10 @@ struct FullScreenImageView: View {
             }
         )
         .contentShape(Rectangle())
+        .onLongPressGesture {
+            guard currentImageSourcePostID != nil else { return }
+            showsJumpToFloorDialog = true
+        }
     }
 
     private var bottomBar: some View {
