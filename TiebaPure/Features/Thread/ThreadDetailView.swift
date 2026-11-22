@@ -342,16 +342,10 @@ struct ThreadDetailView: View {
             .toolbar(.hidden, for: .tabBar)
             .onAppear(perform: handleAppear)
             .onDisappear(perform: handleDisappear)
-            .onReceive(NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost)) { note in
-                guard isPageVisible,
-                      let postID = note.userInfo?["postID"] as? UInt64,
-                      postID > 0 else { return }
-                if let noteThreadID = note.userInfo?["threadID"] as? Int64,
-                   noteThreadID != threadID {
-                    return
-                }
-                requestScroll(to: postID)
-            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .tiebaJumpToThreadPost),
+                perform: handleJumpToThreadPost
+            )
     }
 
     private var threadNavigationTitle: String {
@@ -511,6 +505,17 @@ struct ThreadDetailView: View {
         navigationSourceLifecycle.didAppear()
         isPageVisible = true
         completeOwnThreadDeletionNavigationIfPossible()
+    }
+
+    private func handleJumpToThreadPost(_ note: Notification) {
+        guard isPageVisible,
+              let postID = note.userInfo?["postID"] as? UInt64,
+              postID > 0 else { return }
+        if let noteThreadID = note.userInfo?["threadID"] as? Int64,
+           noteThreadID != threadID {
+            return
+        }
+        requestScroll(to: postID)
     }
 
     @ViewBuilder
