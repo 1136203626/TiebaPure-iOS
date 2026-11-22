@@ -316,6 +316,10 @@ enum InlineImageLayoutPolicy {
     }
 }
 
+extension Notification.Name {
+    static let tiebaJumpToThreadPost = Notification.Name("tiebaJumpToThreadPost")
+}
+
 struct ImagePreviewSession: Identifiable {
     let id = UUID()
     let images: [ImageContent]
@@ -329,7 +333,6 @@ struct ImagePreviewSession: Identifiable {
     /// view reference, so cell recycling cannot redirect it to another post.
     let sourceIdentity: String?
     let prefetchesAdjacentPages: Bool
-    /// 列表预览时记录所属帖子，便于「跳转楼层」打开帖子详情。
     let contextThreadID: Int64?
     let contextForumID: Int64?
 
@@ -437,22 +440,6 @@ final class ImagePreviewSourceRegistry {
         UIView.performWithoutAnimation {
             for entry in suppressed.values {
                 entry.view?.isHidden = entry.wasHidden
-            }
-        }
-    }
-
-    func endAllSuppressions() {
-        let identities = Array(suppressionCounts.keys)
-        for identity in identities {
-            // Force full restore regardless of nested count.
-            suppressionCounts[identity] = 1
-            endSuppression(identity: identity)
-        }
-        // Catch orphans with entries but zero counts.
-        for identity in Array(suppressedEntries.keys) {
-            if suppressionCounts[identity] == nil {
-                suppressionCounts[identity] = 1
-                endSuppression(identity: identity)
             }
         }
     }
@@ -1824,27 +1811,21 @@ final class MediaPreviewDismissalInteractionGate: UIGestureRecognizer,
         true
     }
 
-    /// Finish immediately when the modal transition ends.
-    ///
-    /// Waiting for an in-flight touch (the swipe-to-dismiss pan) used to leave
-    /// this window-level recognizer armed forever when UIKit never delivered
-    /// `touchesEnded` cleanly. That froze the home feed after closing a GIF
-    /// opened from the list. Replay any pending tap asynchronously instead.
+    /// If a touch is already in flight, keep the old lifecycle until it ends so
+    /// its intent can be queued before the coordinator becomes idle. Otherwise
+    /// finish immediately but leave this non-cancelling observer armed for the
+    /// first post-dismissal touch; SwiftUI occasionally needs that replay even
+    /// though UIKit has already completed the modal transition.
     func transitionDidComplete(completion: @escaping () -> Void) {
         guard didCompleteTransition == false else { return }
         didCompleteTransition = true
-        let pendingPoint = pendingTapPoint
-        pendingTapPoint = nil
-        initialWindowPoint = nil
-        transitionCompletion = nil
-        let window = view as? UIWindow
-        removeFromWindow()
-        completion()
-        if let pendingPoint, let window {
-            DispatchQueue.main.async { [onTapAtWindowPoint] in
-                onTapAtWindowPoint(pendingPoint, window)
-            }
+        transitionCompletion = completion
+        if didObserveFirstTouch == false {
+            transitionCompletion = nil
+            completion()
+            return
         }
+        finishIfPossible()
     }
 
     func cancel() {
@@ -1855,13 +1836,17 @@ final class MediaPreviewDismissalInteractionGate: UIGestureRecognizer,
     }
 
     private func finishIfPossible() {
-        // Kept for touchesEnded / touchesCancelled while the transition is
-        // still running. Once `transitionDidComplete` runs, the gate is gone.
-        guard didCompleteTransition == false else { return }
-        guard initialWindowPoint == nil else { return }
+        guard didCompleteTransition, initialWindowPoint == nil else {
+            return
+        }
         if let pendingTapPoint, let window = view as? UIWindow {
             self.pendingTapPoint = nil
             onTapAtWindowPoint(pendingTapPoint, window)
+        }
+        removeFromWindow()
+        if let transitionCompletion {
+            self.transitionCompletion = nil
+            transitionCompletion()
         }
     }
 
@@ -1989,36 +1974,6 @@ final class ImagePreviewPresentationState {
     }
 }
 
-
-@MainActor
-enum MediaPreviewTouchDeliveryReset {
-    /// Clears stuck gesture state after modal media dismiss without blanking
-    /// the root view (toggling `isUserInteractionEnabled` off caused a long
-    /// wait before the feed could scroll again).
-    static func run() {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        for scene in scenes {
-            for window in scene.windows where window.isHidden == false {
-                window.isUserInteractionEnabled = true
-                for recognizer in window.gestureRecognizers ?? [] {
-                    let wasEnabled = recognizer.isEnabled
-                    recognizer.isEnabled = false
-                    recognizer.isEnabled = wasEnabled
-                }
-                if let root = window.rootViewController?.view {
-                    root.isUserInteractionEnabled = true
-                    for recognizer in root.gestureRecognizers ?? [] {
-                        let wasEnabled = recognizer.isEnabled
-                        recognizer.isEnabled = false
-                        recognizer.isEnabled = wasEnabled
-                    }
-                }
-            }
-        }
-        ImagePreviewSourceRegistry.shared.endAllSuppressions()
-    }
-}
-
 @MainActor
 private final class ImagePreviewDismissRelay {
     weak var controller: ImagePreviewHostingController?
@@ -2029,16 +1984,9 @@ private final class ImagePreviewDismissRelay {
               controller.isBeingDismissed == false else {
             return
         }
-        // Skip custom hero dismissal. Incomplete completeTransition after
-        // swipe-closing a feed GIF freezes the entire app (no touch response).
-        controller.prepareSimpleDismissal()
         controller.beginDismissalIfNeeded()
-        // Unlock the underlying feed immediately; do not wait for a long
-        // system dismiss animation before hit-testing works again.
-        MediaPreviewTouchDeliveryReset.run()
-        controller.dismiss(animated: false) {
+        controller.dismiss(animated: ImagePreviewTransitionMotionPolicy.animationsEnabled) {
             controller.finishDismissalIfNeeded()
-            MediaPreviewTouchDeliveryReset.run()
         }
     }
 }
@@ -2059,7 +2007,6 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     private var didBeginDismissal = false
     private var didFinishDismissal = false
     private var dismissalInteractionGate: MediaPreviewDismissalInteractionGate?
-    private var prefersSimpleDismissal = false
 
     init(
         session: ImagePreviewSession,
@@ -2090,14 +2037,6 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         presentationController?.delegate = self
-        // Feed-list GIF thumbnails can race the custom hero completion path so
-        // `didFinishPresentation` never flips. Without that flag swipe-to-dismiss
-        // is permanently disabled while the static-image path from post detail
-        // still works. Unlock here regardless of how the transition finished.
-        finishPresentationIfNeeded()
-        DispatchQueue.main.async { [weak self] in
-            self?.finishPresentationIfNeeded()
-        }
     }
 
     func presentationControllerWillDismiss(_ presentationController: UIPresentationController) {
@@ -2127,16 +2066,7 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     func animationController(
         forDismissed dismissed: UIViewController
     ) -> UIViewControllerAnimatedTransitioning? {
-        if prefersSimpleDismissal {
-            return nil
-        }
-        return MediaPreviewHeroAnimator(operation: .dismissal, participant: self)
-    }
-
-    func prepareSimpleDismissal() {
-        prefersSimpleDismissal = true
-        // Drop custom transitioning so UIKit owns the dismiss animation end-to-end.
-        transitioningDelegate = nil
+        MediaPreviewHeroAnimator(operation: .dismissal, participant: self)
     }
 
     var mediaPreviewHeroSourceIdentity: String? {
@@ -2216,16 +2146,32 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
         guard didBeginDismissal == false else { return }
         didBeginDismissal = true
         onDismissalBegan(session.id)
-        // Never install a window-level interaction gate. It has left the home
-        // feed completely unresponsive after closing GIF previews.
+        if let window = view.window {
+            dismissalInteractionGate = MediaPreviewDismissalInteractionGate(
+                onTapAtWindowPoint: { point, window in
+                    ImagePreviewSourceRegistry.shared.activateSource(
+                        at: point,
+                        in: window
+                    )
+                }
+            )
+            .installed(in: window)
+        }
     }
 
     func finishDismissalIfNeeded() {
         guard didFinishDismissal == false else { return }
         didFinishDismissal = true
-        dismissalInteractionGate?.cancel()
-        dismissalInteractionGate = nil
-        onDismissalFinished(session.id)
+        let finish = onDismissalFinished
+        let sessionID = session.id
+        guard let dismissalInteractionGate else {
+            finish(sessionID)
+            return
+        }
+        self.dismissalInteractionGate = nil
+        dismissalInteractionGate.transitionDidComplete {
+            finish(sessionID)
+        }
     }
 
     func heroPresentationDidCancel() {
@@ -2243,7 +2189,6 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     }
 }
 
-@MainActor
 
 enum ThreadImageGalleryLoadPolicy {
     static let maximumPages = 5
@@ -2251,7 +2196,6 @@ enum ThreadImageGalleryLoadPolicy {
 }
 
 enum ThreadImagePreviewPresenter {
-    /// 首页 / 吧内列表点图：先尽量拉帖子分页拼全帖图廊，失败则回退摘要图。
     @MainActor
     static func presentFromFeed(
         thread: ThreadSummary,
@@ -2264,9 +2208,7 @@ enum ThreadImagePreviewPresenter {
         sourceAnchor: ImagePreviewSourceAnchor?,
         prefetchesAdjacentPages: Bool
     ) {
-        let fallback = summaryImages.isEmpty == false
-            ? summaryImages
-            : summaryImages
+        let fallback = summaryImages
         let startIndex = ImagePreviewIndexPolicy.clampedIndex(
             initialIndex,
             totalCount: max(fallback.count, 1)
@@ -2282,16 +2224,16 @@ enum ThreadImagePreviewPresenter {
                 fallback: fallback,
                 firstPostID: thread.firstPostID
             )
-            let index: Int = {
-                if let startImage {
-                    return ThreadImageGalleryBuilder.index(
-                        of: startImage,
-                        in: gallery,
-                        fallbackLocalIndex: startIndex
-                    )
-                }
-                return ImagePreviewIndexPolicy.clampedIndex(startIndex, totalCount: gallery.count)
-            }()
+            let index: Int
+            if let startImage {
+                index = ThreadImageGalleryBuilder.index(
+                    of: startImage,
+                    in: gallery,
+                    fallbackLocalIndex: startIndex
+                )
+            } else {
+                index = ImagePreviewIndexPolicy.clampedIndex(startIndex, totalCount: gallery.count)
+            }
 
             ImagePreviewCoordinator.shared.present(
                 ImagePreviewSession(
@@ -2319,6 +2261,7 @@ enum ThreadImagePreviewPresenter {
     ) async -> [ImageContent] {
         var collected: [ImageContent] = []
         var seen = Set<String>()
+
         func appendUnique(_ images: [ImageContent]) {
             for image in images {
                 let key = (image.originalURL ?? image.thumbnailURL)?.absoluteString
@@ -2354,11 +2297,10 @@ enum ThreadImagePreviewPresenter {
                 }
             }
         } catch {
-            // 网络失败时用列表摘要图
         }
 
         if collected.isEmpty {
-            return fallback.enumerated().map { index, image in
+            return fallback.map { image in
                 if image.sourcePostID != nil { return image }
                 if let firstPostID {
                     return image.tagged(postID: firstPostID, floor: 1)
@@ -2370,20 +2312,29 @@ enum ThreadImagePreviewPresenter {
     }
 }
 
+@MainActor
 final class ImagePreviewCoordinator {
     static let shared = ImagePreviewCoordinator()
 
     private let arbiter = MediaPreviewPresentationArbiter.shared
     private var activeController: ImagePreviewHostingController?
+    private var activeContextThreadID: Int64?
+    private var activeContextForumID: Int64?
+
     private init() {}
 
     func jumpToPostAfterDismiss(_ postID: UInt64) {
         guard postID > 0 else { return }
+        let threadID = activeContextThreadID
+        let forumID = activeContextForumID
         let post: () -> Void = {
+            var info: [String: Any] = ["postID": postID]
+            if let threadID { info["threadID"] = threadID }
+            if let forumID { info["forumID"] = forumID }
             NotificationCenter.default.post(
                 name: .tiebaJumpToThreadPost,
                 object: nil,
-                userInfo: ["postID": postID]
+                userInfo: info
             )
         }
         if let controller = activeController {
@@ -2529,7 +2480,6 @@ final class ImagePreviewCoordinator {
         ImageDismissScrollRaceProbe.shared.dismissalDidFinish(sessionID: sessionID)
 #endif
         _ = arbiter.dismissalDidFinish(request)
-        MediaPreviewTouchDeliveryReset.run()
     }
 
     private func cancelPresentation(
@@ -2543,8 +2493,6 @@ final class ImagePreviewCoordinator {
         if activeController?.session.id == sessionID {
             activeController = nil
         }
-    
-        MediaPreviewTouchDeliveryReset.run()
     }
 
     private func cancelDismissal(
@@ -2553,8 +2501,6 @@ final class ImagePreviewCoordinator {
     ) {
         guard sessionID == request.id else { return }
         _ = arbiter.dismissalDidCancel(request)
-    
-        MediaPreviewTouchDeliveryReset.run()
     }
 
     static func topPresenter() -> UIViewController? {
@@ -3550,9 +3496,6 @@ private final class FullScreenZoomImageController: UIViewController,
     private func commitStashedResolvedImage() {
         guard let resolvedImage, resolvedImageView.image !== resolvedImage else { return }
         resolvedImageView.image = resolvedImage
-        if (resolvedImage.images?.count ?? 0) > 1 {
-            resolvedImageView.startAnimating()
-        }
     }
 
     private func startOriginalImageLoading() {
@@ -3621,12 +3564,6 @@ private final class FullScreenZoomImageController: UIViewController,
 
     private func startAutomaticResolutionUpgradeIfNeeded() {
         guard didResolveAutomaticPreview, let image = resolvedImage else { return }
-        // Multi-frame GIF/WebP previews must not upgrade to a full-size animated
-        // original. Decoding and swapping that bitmap freezes the main thread and
-        // leaves the viewer unable to accept swipe-to-dismiss.
-        if (image.images?.count ?? 0) > 1 {
-            return
-        }
         let pixelSize = CGSize(
             width: image.cgImage.map { CGFloat($0.width) } ?? image.size.width * image.scale,
             height: image.cgImage.map { CGFloat($0.height) } ?? image.size.height * image.scale
@@ -3664,9 +3601,6 @@ private final class FullScreenZoomImageController: UIViewController,
         let changes = { [weak self] in
             guard let self else { return }
             self.resolvedImageView.image = image
-            if (image.images?.count ?? 0) > 1 {
-                self.resolvedImageView.startAnimating()
-            }
             self.resolvedImageView.alpha = 1
             self.placeholderImageView.alpha = 0
             self.didRevealResolvedImage = true
@@ -3737,7 +3671,6 @@ private final class FullScreenZoomImageController: UIViewController,
         let pan = dismissPanGestureRecognizer
         activeDismissAxis = FullScreenImageDismissGesturePolicy.axis(
             velocity: pan.velocity(in: view),
-            translation: pan.translation(in: view),
             isFirstImage: imageIndex == 0,
             isZoomed: FullScreenImageZoomPolicy.isZoomed(scrollView.zoomScale)
         )
@@ -3752,9 +3685,6 @@ private final class FullScreenZoomImageController: UIViewController,
         )
         switch recognizer.state {
         case .changed:
-            if resolvedImageView.isAnimating {
-                resolvedImageView.stopAnimating()
-            }
             scrollView.transform = CGAffineTransform(
                 translationX: translation.x,
                 y: translation.y
@@ -3769,12 +3699,6 @@ private final class FullScreenZoomImageController: UIViewController,
             )
             if shouldDismiss {
                 isCompletingDismissGesture = true
-                scrollView.transform = .identity
-                dismissPanGestureRecognizer.isEnabled = false
-                dismissPanGestureRecognizer.isEnabled = true
-                if resolvedImageView.isAnimating {
-                    resolvedImageView.stopAnimating()
-                }
                 reportResolvedImageLayoutIfPossible()
                 onInteractiveDismiss?()
             } else {
@@ -3791,9 +3715,6 @@ private final class FullScreenZoomImageController: UIViewController,
 
     private func restoreImageAfterCancelledDismissal() {
         isCompletingDismissGesture = true
-        if (resolvedImage?.images?.count ?? 0) > 1 {
-            resolvedImageView.startAnimating()
-        }
         guard UIAccessibility.isReduceMotionEnabled == false else {
             scrollView.transform = .identity
             isCompletingDismissGesture = false
@@ -4822,21 +4743,6 @@ enum ImagePreviewIndexPolicy {
     }
 }
 
-
-enum FullScreenImageStillFrame {
-    /// Animated UIImage instances (GIF/WebP) keep every frame in `images`.
-    /// Hero transitions and dismiss gating must use a single still bitmap;
-    /// otherwise the custom transition can fail to publish completion when the
-    /// preview is opened from an animating feed thumbnail.
-    static func image(from image: UIImage?) -> UIImage? {
-        guard let image else { return nil }
-        if let frames = image.images, let first = frames.first {
-            return first
-        }
-        return image
-    }
-}
-
 enum FullScreenImageZoomPolicy {
     static let minimumScale: CGFloat = 1
     static let maximumScale: CGFloat = 4
@@ -4871,29 +4777,16 @@ enum FullScreenImageDismissGesturePolicy {
 
     static func axis(
         velocity: CGPoint,
-        translation: CGPoint = .zero,
         isFirstImage: Bool,
         isZoomed: Bool
     ) -> FullScreenImageDismissAxis? {
         guard isZoomed == false else { return nil }
         let horizontalSpeed = abs(velocity.x)
         let verticalSpeed = abs(velocity.y)
-        let horizontalTravel = abs(translation.x)
-        let verticalTravel = abs(translation.y)
-
-        // shouldBegin often samples near-zero velocity. Prefer translation so
-        // vertical swipe-to-dismiss still wins for animated images while the
-        // main thread is busy advancing GIF frames.
-        let horizontalDominant = horizontalTravel > verticalTravel * horizontalPagingDominance
-            || (horizontalTravel <= 0.5 && horizontalSpeed > verticalSpeed * horizontalPagingDominance)
-        if horizontalDominant {
-            let movingRight = translation.x > 0 || velocity.x > 0
-            return isFirstImage && movingRight ? .horizontalRight : nil
+        if horizontalSpeed > verticalSpeed * horizontalPagingDominance {
+            return isFirstImage && velocity.x > 0 ? .horizontalRight : nil
         }
-        if verticalTravel > 0 || verticalSpeed > 0 {
-            return .vertical
-        }
-        return nil
+        return verticalSpeed > 0 ? .vertical : nil
     }
 
     static func adjustedTranslation(
