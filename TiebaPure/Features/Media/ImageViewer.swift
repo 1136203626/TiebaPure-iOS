@@ -354,7 +354,7 @@ struct ImagePreviewSession: Identifiable {
             totalCount: images.count
         )
         self.sourceFrame = ImagePreviewTransitionGeometry.validSourceFrame(sourceFrame)
-        self.sourceImage = FullScreenImageStillFrame.image(from: sourceImage)
+        self.sourceImage = sourceImage
         self.sourceAnchor = sourceAnchor
         sourceToken = sourceAnchor?.transitionToken
         self.sourceIdentity = sourceIdentity ?? sourceAnchor?.sourceIdentity
