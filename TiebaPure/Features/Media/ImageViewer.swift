@@ -4002,7 +4002,7 @@ private final class FullScreenZoomImageController: UIViewController,
 
 
 @MainActor
-final class ImagePreviewGalleryModel: ObservableObject {
+fileprivate final class ImagePreviewGalleryModel: ObservableObject {
     let sessionID: UUID
     @Published private(set) var items: [FullScreenImageItem]
     @Published var currentIndex: Int
@@ -4154,7 +4154,7 @@ struct FullScreenImageView: View {
         self.onZoomStateChange = onZoomStateChange
         self.transitionState = transitionState
         prefetchesAdjacentPages = session.prefetchesAdjacentPages
-        _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: finalItems))
+        _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: gallery.items))
         _originalLoadRequests = State(initialValue: [:])
     }
 
