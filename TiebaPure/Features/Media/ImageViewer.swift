@@ -4118,7 +4118,7 @@ struct FullScreenImageView: View {
         _originalLoadRequests = State(initialValue: [:])
     }
 
-    init(
+    fileprivate init(
         session: ImagePreviewSession,
         transitionState: ImagePreviewPresentationState,
         gallery: ImagePreviewGalleryModel? = nil,
@@ -4128,8 +4128,9 @@ struct FullScreenImageView: View {
         onCurrentImageResolved: ((Int, UIImage, CGRect?) -> Void)? = nil,
         onZoomStateChange: ((Int, Bool) -> Void)? = nil
     ) {
+        let resolvedGallery: ImagePreviewGalleryModel
         if let gallery {
-            self.gallery = gallery
+            resolvedGallery = gallery
         } else {
             let resolvedItems = session.images.enumerated().map { index, image in
                 FullScreenImageItem(
@@ -4141,12 +4142,13 @@ struct FullScreenImageView: View {
             let finalItems = resolvedItems.isEmpty
                 ? [FullScreenImageItem(url: nil, index: 0)]
                 : resolvedItems
-            self.gallery = ImagePreviewGalleryModel(
+            resolvedGallery = ImagePreviewGalleryModel(
                 items: finalItems,
                 currentIndex: session.initialIndex,
                 sessionID: session.id
             )
         }
+        self.gallery = resolvedGallery
         self.saveAction = saveAction
         self.onRequestDismiss = onRequestDismiss
         self.onCurrentIndexChange = onCurrentIndexChange
@@ -4154,7 +4156,7 @@ struct FullScreenImageView: View {
         self.onZoomStateChange = onZoomStateChange
         self.transitionState = transitionState
         prefetchesAdjacentPages = session.prefetchesAdjacentPages
-        _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: gallery.items))
+        _originalLoadStates = State(initialValue: Self.initialOriginalLoadStates(for: resolvedGallery.items))
         _originalLoadRequests = State(initialValue: [:])
     }
 
