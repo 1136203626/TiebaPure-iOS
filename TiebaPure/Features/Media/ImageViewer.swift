@@ -2769,9 +2769,16 @@ enum ImagePreviewResolvedImageVisibilityPolicy {
     }
 
     static func animatesResolvedReveal(
-        presentationFinishedBeforeResolution: Bool
+        presentationFinishedBeforeResolution: Bool,
+        hasPlaceholder: Bool = false
     ) -> Bool {
-        presentationFinishedBeforeResolution
+        // List-page gallery expand recreates the page controller after the hero
+        // already finished. The new controller still has a placeholder on screen;
+        // animating placeholder -> resolved is the full-image fade users notice.
+        if hasPlaceholder {
+            return false
+        }
+        return presentationFinishedBeforeResolution
     }
 }
 
@@ -3155,7 +3162,21 @@ private final class FullScreenZoomImageController: UIViewController,
         resolvedImageView.contentMode = .scaleAspectFit
         resolvedImageView.clipsToBounds = true
         resolvedImageView.backgroundColor = .clear
-        resolvedImageView.alpha = placeholderImage == nil ? 1 : 0
+        // When expand rebuilds this page with a placeholder (often the already
+        // decoded frame), show it immediately on the resolved layer so a later
+        // cache-hit load does not need a fade to become visible.
+        if placeholderImage != nil,
+           FullScreenImagePlaceholderPolicy.canReuseAsPreview(
+            placeholderSize: placeholderImage?.size,
+            imageAspectRatio: imageAspectRatio
+           ) {
+            resolvedImageView.image = placeholderImage
+            resolvedImageView.alpha = 1
+            placeholderImageView.alpha = 0
+            didRevealResolvedImage = true
+        } else {
+            resolvedImageView.alpha = placeholderImage == nil ? 1 : 0
+        }
         zoomContentView.addSubview(resolvedImageView)
 
         activityIndicator.color = .white
@@ -3575,7 +3596,8 @@ private final class FullScreenZoomImageController: UIViewController,
                 }
                 self.updateResolvedImageVisibility(animated:
                     ImagePreviewResolvedImageVisibilityPolicy.animatesResolvedReveal(
-                        presentationFinishedBeforeResolution: loadedAfterPresentation
+                        presentationFinishedBeforeResolution: loadedAfterPresentation,
+                        hasPlaceholder: self.placeholderImage != nil
                     )
                 )
                 self.reportResolvedImageLayoutIfPossible()
@@ -3703,9 +3725,14 @@ private final class FullScreenZoomImageController: UIViewController,
             self.placeholderImageView.alpha = 0
             self.didRevealResolvedImage = true
         }
-        guard viewIfLoaded?.window != nil,
-              resolvedImageView.image != nil,
-              UIAccessibility.isReduceMotionEnabled == false else {
+        // Cross-dissolve only for the first reveal from an empty surface.
+        // After gallery expand the page is rebuilt with a placeholder already
+        // visible; dissolving again reads as the whole image flashing.
+        let shouldAnimate = viewIfLoaded?.window != nil
+            && resolvedImageView.image != nil
+            && placeholderImage == nil
+            && UIAccessibility.isReduceMotionEnabled == false
+        guard shouldAnimate else {
             changes()
             return
         }
@@ -4070,7 +4097,8 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
 
         let newItems = images.enumerated().map { index, image -> FullScreenImageItem in
             let candidate = FullScreenImageItem(image: image, index: index)
-            if let placeholder = existingPlaceholderByID[candidate.id] {
+            let resolved = resolvedImageByID[candidate.id]
+            if let placeholder = resolved ?? existingPlaceholderByID[candidate.id] {
                 return FullScreenImageItem(
                     image: image,
                     index: index,
@@ -4078,15 +4106,17 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
                 )
             }
             if let current,
-               let placeholder = current.placeholderImage,
                (candidate.originalURL == currentURL || candidate.primaryURL == currentURL
                 || candidate.originalURL == current.originalURL
                 || candidate.primaryURL == current.primaryURL) {
-                return FullScreenImageItem(
-                    image: image,
-                    index: index,
-                    placeholderImage: placeholder
-                )
+                let placeholder = resolvedImageByID[current.id] ?? current.placeholderImage
+                if let placeholder {
+                    return FullScreenImageItem(
+                        image: image,
+                        index: index,
+                        placeholderImage: placeholder
+                    )
+                }
             }
             return candidate
         }
@@ -4126,7 +4156,11 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
         // Keep the cover up long enough for TabView/UIPageViewController to
         // rebuild pages and for the current page representable to reattach.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            self?.expandCoverImage = nil
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                self?.expandCoverImage = nil
+            }
         }
         return true
     }
