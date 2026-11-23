@@ -2045,32 +2045,6 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     private var didBeginDismissal = false
     private var didFinishDismissal = false
     private var dismissalInteractionGate: MediaPreviewDismissalInteractionGate?
-    private var expandFreezeOverlay: UIImageView?
-
-    /// Pixel-freeze the visible preview while list-page gallery expand rebuilds
-    /// TabView. SwiftUI-level covers still allow one frame of the rebuild to show.
-    func installExpandFreezeOverlay() {
-        removeExpandFreezeOverlay()
-        guard view.bounds.width > 1, view.bounds.height > 1 else { return }
-        let renderer = UIGraphicsImageRenderer(bounds: view.bounds)
-        let snapshot = renderer.image { context in
-            view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
-        }
-        let overlay = UIImageView(image: snapshot)
-        overlay.frame = view.bounds
-        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        overlay.contentMode = .scaleToFill
-        overlay.isUserInteractionEnabled = false
-        overlay.accessibilityElementsHidden = true
-        view.addSubview(overlay)
-        expandFreezeOverlay = overlay
-    }
-
-    func removeExpandFreezeOverlay() {
-        expandFreezeOverlay?.removeFromSuperview()
-        expandFreezeOverlay = nil
-    }
-
     init(
         session: ImagePreviewSession,
         transitionState: ImagePreviewPresentationState,
@@ -2401,25 +2375,13 @@ final class ImagePreviewCoordinator {
     ) {
         guard let gallery = activeGallery,
               gallery.sessionID == sessionID,
-              let controller = activeController,
-              controller.session.id == sessionID else {
+              activeController?.session.id == sessionID else {
             return
         }
-        // Freeze exact on-screen pixels in UIKit before TabView rebuilds.
-        // This is the only reliable way to hide the full-image fade that happens
-        // when the current page controller is torn down and recreated.
-        controller.installExpandFreezeOverlay()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             _ = gallery.expand(images: images, focus: focus)
-        }
-        // Keep the pixel freeze until the rebuilt pager has had time to attach
-        // the current page under the overlay, then lift it without animation.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            UIView.performWithoutAnimation {
-                controller.removeExpandFreezeOverlay()
-            }
         }
     }
 
@@ -2942,6 +2904,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
     let placeholderImage: UIImage?
     let transitionState: ImagePreviewPresentationState
     let imageIndex: Int
+    let totalImageCount: Int
     let coordinatesWithParentPager: Bool
     let prefetchesAdjacentPages: Bool
     let originalLoadRequest: Int
@@ -2952,6 +2915,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
     let onZoomStateChange: (Bool) -> Void
     let onSingleTap: () -> Void
     let onInteractiveDismiss: () -> Void
+    let onAdjacentPageRequest: (Int) -> Void
 
     func makeUIViewController(context: Context) -> FullScreenZoomImageController {
         FullScreenZoomImageController(
@@ -2962,6 +2926,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
             placeholderImage: placeholderImage,
             transitionState: transitionState,
             imageIndex: imageIndex,
+            totalImageCount: totalImageCount,
             coordinatesWithParentPager: coordinatesWithParentPager,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
             onImageResolved: onImageResolved,
@@ -2970,7 +2935,8 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
             onOriginalFileSizeChange: onOriginalFileSizeChange,
             onZoomStateChange: onZoomStateChange,
             onSingleTap: onSingleTap,
-            onInteractiveDismiss: onInteractiveDismiss
+            onInteractiveDismiss: onInteractiveDismiss,
+            onAdjacentPageRequest: onAdjacentPageRequest
         )
     }
 
@@ -2985,6 +2951,8 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
         uiViewController.onZoomStateChange = onZoomStateChange
         uiViewController.onSingleTap = onSingleTap
         uiViewController.onInteractiveDismiss = onInteractiveDismiss
+        uiViewController.onAdjacentPageRequest = onAdjacentPageRequest
+        uiViewController.updatePagingContext(imageIndex: imageIndex, totalImageCount: totalImageCount)
         uiViewController.updateAccessibility(imageIndex: imageIndex)
         uiViewController.reportResolvedImageLayoutIfPossible()
         uiViewController.requestOriginalImage(ifNewRequest: originalLoadRequest)
@@ -3002,6 +2970,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
         uiViewController.onZoomStateChange = nil
         uiViewController.onSingleTap = nil
         uiViewController.onInteractiveDismiss = nil
+        uiViewController.onAdjacentPageRequest = nil
     }
 }
 
@@ -3072,6 +3041,9 @@ private final class FullScreenZoomImageController: UIViewController,
     var onZoomStateChange: ((Bool) -> Void)?
     var onSingleTap: (() -> Void)?
     var onInteractiveDismiss: (() -> Void)?
+    var onAdjacentPageRequest: ((Int) -> Void)?
+    private var totalImageCount: Int
+    private var activePageDelta: Int?
 
     init(
         primaryURL: URL?,
@@ -3081,6 +3053,7 @@ private final class FullScreenZoomImageController: UIViewController,
         placeholderImage: UIImage?,
         transitionState: ImagePreviewPresentationState,
         imageIndex: Int,
+        totalImageCount: Int,
         coordinatesWithParentPager: Bool,
         prefetchesAdjacentPages: Bool,
         onImageResolved: @escaping (UIImage, CGRect?) -> Void,
@@ -3089,7 +3062,8 @@ private final class FullScreenZoomImageController: UIViewController,
         onOriginalFileSizeChange: @escaping (Int64?) -> Void,
         onZoomStateChange: @escaping (Bool) -> Void,
         onSingleTap: @escaping () -> Void,
-        onInteractiveDismiss: @escaping () -> Void
+        onInteractiveDismiss: @escaping () -> Void,
+        onAdjacentPageRequest: @escaping (Int) -> Void
     ) {
         self.primaryURL = primaryURL
         self.fallbackURL = fallbackURL
@@ -3098,6 +3072,7 @@ private final class FullScreenZoomImageController: UIViewController,
         self.placeholderImage = placeholderImage
         self.transitionState = transitionState
         self.imageIndex = imageIndex
+        self.totalImageCount = max(totalImageCount, 1)
         self.coordinatesWithParentPager = coordinatesWithParentPager
         self.prefetchesAdjacentPages = prefetchesAdjacentPages
         if FullScreenImagePlaceholderPolicy.canReuseAsPreview(
@@ -3115,7 +3090,13 @@ private final class FullScreenZoomImageController: UIViewController,
         self.onZoomStateChange = onZoomStateChange
         self.onSingleTap = onSingleTap
         self.onInteractiveDismiss = onInteractiveDismiss
+        self.onAdjacentPageRequest = onAdjacentPageRequest
         super.init(nibName: nil, bundle: nil)
+    }
+
+    func updatePagingContext(imageIndex: Int, totalImageCount: Int) {
+        self.imageIndex = imageIndex
+        self.totalImageCount = max(totalImageCount, 1)
     }
 
     @available(*, unavailable)
@@ -3834,15 +3815,68 @@ private final class FullScreenZoomImageController: UIViewController,
             return false
         }
         let pan = dismissPanGestureRecognizer
+        let velocity = pan.velocity(in: view)
+        activePageDelta = nil
         activeDismissAxis = FullScreenImageDismissGesturePolicy.axis(
-            velocity: pan.velocity(in: view),
+            velocity: velocity,
             isFirstImage: imageIndex == 0,
             isZoomed: FullScreenImageZoomPolicy.isZoomed(scrollView.zoomScale)
         )
-        return activeDismissAxis != nil
+        if activeDismissAxis != nil {
+            return true
+        }
+        // Without a parent TabView, horizontal swipes at 1x change pages here.
+        guard coordinatesWithParentPager == false,
+              FullScreenImageZoomPolicy.isZoomed(scrollView.zoomScale) == false else {
+            return false
+        }
+        let horizontalSpeed = abs(velocity.x)
+        let verticalSpeed = abs(velocity.y)
+        guard horizontalSpeed > verticalSpeed * 1.15 else { return false }
+        if velocity.x < 0, imageIndex < totalImageCount - 1 {
+            activePageDelta = 1
+            return true
+        }
+        if velocity.x > 0, imageIndex > 0 {
+            activePageDelta = -1
+            return true
+        }
+        return false
     }
 
     @objc private func handleDismissPan(_ recognizer: UIPanGestureRecognizer) {
+        if let pageDelta = activePageDelta {
+            let translation = recognizer.translation(in: view)
+            switch recognizer.state {
+            case .changed:
+                scrollView.transform = CGAffineTransform(
+                    translationX: translation.x,
+                    y: 0
+                )
+                reportResolvedImageLayoutIfPossible()
+            case .ended:
+                let velocity = recognizer.velocity(in: view)
+                let shouldTurn = abs(translation.x) > view.bounds.width * 0.18
+                    || abs(velocity.x) > 500
+                if shouldTurn {
+                    isCompletingDismissGesture = true
+                    scrollView.transform = .identity
+                    isCompletingDismissGesture = false
+                    reportResolvedImageLayoutIfPossible()
+                    onAdjacentPageRequest?(pageDelta)
+                } else {
+                    restoreImageAfterCancelledDismissal()
+                }
+                activePageDelta = nil
+            case .cancelled, .failed:
+                restoreImageAfterCancelledDismissal()
+                activePageDelta = nil
+            default:
+                break
+            }
+            return
+        }
+
         guard let axis = activeDismissAxis else { return }
         let translation = FullScreenImageDismissGesturePolicy.adjustedTranslation(
             recognizer.translation(in: view),
@@ -4089,10 +4123,7 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
     /// page controller does not tear down the visible page when its index shifts
     /// (e.g. summary index 0 -> full-gallery index 12).
     @Published var currentItemID: String
-    /// Non-nil while the gallery data is being replaced after list-page full-floor load.
-    /// FullScreenImageView draws this as a cover so TabView rebuild does not flash.
-    @Published private(set) var expandCoverImage: UIImage?
-    /// Latest decoded frame per stable item id, used as a higher-quality expand cover.
+    /// Latest decoded frame per stable item id, reused as placeholder across expand.
     private var resolvedImageByID: [String: UIImage] = [:]
 
     func noteResolvedImage(_ image: UIImage, forItemID itemID: String) {
@@ -4202,40 +4233,22 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
             return false
         }
 
-        // Cover the pager while TabView inserts the new full-floor pages.
-        if let current {
-            expandCoverImage = resolvedImageByID[current.id] ?? current.placeholderImage
-        } else {
-            expandCoverImage = nil
-        }
-        // Keep selecting the same item *id* so TabView does not treat expand as a
-        // page turn (index 0 -> index N was destroying the visible page VC).
+        // Keep the focused image id so the single-page viewer identity is unchanged.
         let preferredID = current?.id
-        UIView.performWithoutAnimation {
-            items = newItems
-            if let preferredID, let matchedByID = newItems.firstIndex(where: { $0.id == preferredID }) {
-                currentIndex = matchedByID
-                currentItemID = preferredID
-            } else if let matchedIndex {
-                currentIndex = matchedIndex
-                currentItemID = Self.itemID(in: newItems, at: matchedIndex)
-            } else {
-                let clamped = ImagePreviewIndexPolicy.clampedIndex(
-                    currentIndex,
-                    totalCount: newItems.count
-                )
-                currentIndex = clamped
-                currentItemID = Self.itemID(in: newItems, at: clamped)
-            }
-        }
-        // Keep the cover up long enough for TabView/UIPageViewController to
-        // rebuild pages and for the current page representable to reattach.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            var transaction = Transaction()
-            transaction.disablesAnimations = true
-            withTransaction(transaction) {
-                self?.expandCoverImage = nil
-            }
+        items = newItems
+        if let preferredID, let matchedByID = newItems.firstIndex(where: { $0.id == preferredID }) {
+            currentIndex = matchedByID
+            currentItemID = preferredID
+        } else if let matchedIndex {
+            currentIndex = matchedIndex
+            currentItemID = Self.itemID(in: newItems, at: matchedIndex)
+        } else {
+            let clamped = ImagePreviewIndexPolicy.clampedIndex(
+                currentIndex,
+                totalCount: newItems.count
+            )
+            currentIndex = clamped
+            currentItemID = Self.itemID(in: newItems, at: clamped)
         }
         return true
     }
@@ -4377,20 +4390,18 @@ struct FullScreenImageView: View {
             Color.black
                 .ignoresSafeArea()
 
-            // Selection is the stable item id (URL), not the integer index.
-            // List-page expand shifts the focused image's index (0 -> N); if
-            // TabView selection were the index it would tear down the page and
-            // flash the image content while the page counter updates.
+            // Render ONLY the current page, keyed by stable image id.
+            // List-page expand used to feed a TabView whose selection was an
+            // integer index; when the focused image moved from index 0 to N the
+            // page controller tore the visible VC down and the image faded.
+            // Keeping a single representable alive across expand eliminates that.
             Group {
-                TabView(selection: $gallery.currentItemID) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        zoomableImage(item, index: index)
-                            .ignoresSafeArea()
-                            .tag(item.id)
-                    }
+                if items.indices.contains(currentIndex) {
+                    let item = items[currentIndex]
+                    zoomableImage(item, index: currentIndex)
+                        .id(item.id)
+                        .ignoresSafeArea()
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .ignoresSafeArea()
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片浏览器")
@@ -4399,21 +4410,6 @@ struct FullScreenImageView: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 bottomBar
-            }
-
-            // Static cover drawn above the pager while list-page gallery expand
-            // rebuilds TabView. Without this the screen flashes even if the
-            // underlying item id is stable.
-            if let expandCoverImage = gallery.expandCoverImage {
-                ZStack {
-                    Color.black
-                    Image(uiImage: expandCoverImage)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                }
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
             }
         }
         .accessibilityHint("双指捏合或双击缩放，单指可斜向拖动图片，轻点图片返回来源页面")
@@ -4511,7 +4507,8 @@ struct FullScreenImageView: View {
             placeholderImage: item.placeholderImage,
             transitionState: transitionState,
             imageIndex: index,
-            coordinatesWithParentPager: true,
+            totalImageCount: items.count,
+            coordinatesWithParentPager: false,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
             originalLoadRequest: originalLoadRequests[item.id, default: 0],
             onImageResolved: { image, frameInWindow in
@@ -4544,6 +4541,11 @@ struct FullScreenImageView: View {
             },
             onInteractiveDismiss: {
                 close()
+            },
+            onAdjacentPageRequest: { delta in
+                let target = currentIndex + delta
+                guard items.indices.contains(target) else { return }
+                currentIndex = target
             }
         )
         .contentShape(Rectangle())
