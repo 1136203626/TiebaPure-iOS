@@ -2874,9 +2874,26 @@ enum FullScreenImageResolutionUpgradePolicy {
               targetPixelSize > 0 else {
             return false
         }
+        // Thumbnails of GIF/动图 are usually still frames. Prefer the original
+        // automatically so playback starts without a manual "查看原图" tap.
+        if isLikelyAnimatedURL(originalURL) || isLikelyAnimatedURL(previewURL) {
+            return true
+        }
         let longestEdge = max(previewPixelSize.width, previewPixelSize.height)
         guard longestEdge.isFinite, longestEdge > 0 else { return true }
         return longestEdge < CGFloat(targetPixelSize) * minimumPreviewTargetFraction
+    }
+
+    static func isLikelyAnimatedURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        let value = url.absoluteString.lowercased()
+        if value.contains(".gif") || value.contains("image/gif") || value.contains("format=gif") {
+            return true
+        }
+        if value.contains(".webp") && (value.contains("anim") || value.contains("gif")) {
+            return true
+        }
+        return false
     }
 }
 
@@ -3186,13 +3203,14 @@ private final class FullScreenZoomImageController: UIViewController,
             placeholderSize: placeholderImage?.size,
             imageAspectRatio: imageAspectRatio
            ) {
+            // Show the still frame immediately, but do NOT mark automatic preview
+            // as resolved. GIF/动图 need the real network decode to become animated;
+            // treating the still placeholder as final left users stuck until they
+            // manually tapped "查看原图".
             resolvedImageView.image = placeholderImage
             resolvedImageView.alpha = 1
             placeholderImageView.alpha = 0
             didRevealResolvedImage = true
-            // Treat the seeded frame as the automatic preview so expand-rebuild
-            // does not start another load that reassigns the layer contents.
-            didResolveAutomaticPreview = true
             resolvedImage = placeholderImage
             transitionImage = placeholderImage
         } else {
@@ -3860,10 +3878,26 @@ private final class FullScreenZoomImageController: UIViewController,
                     || abs(velocity.x) > 500
                 if shouldTurn {
                     isCompletingDismissGesture = true
-                    scrollView.transform = .identity
-                    isCompletingDismissGesture = false
-                    reportResolvedImageLayoutIfPossible()
-                    onAdjacentPageRequest?(pageDelta)
+                    let width = max(view.bounds.width, 1)
+                    let outbound = CGFloat(pageDelta) * -width
+                    let distance = abs(outbound - translation.x)
+                    let duration = min(0.32, max(0.18, distance / width * 0.28))
+                    UIView.animate(
+                        withDuration: duration,
+                        delay: 0,
+                        options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+                    ) { [weak self] in
+                        self?.scrollView.transform = CGAffineTransform(translationX: outbound, y: 0)
+                    } completion: { [weak self] _ in
+                        guard let self else { return }
+                        // Hide before resetting transform so the outgoing page does
+                        // not pop back to center for one frame under the incoming page.
+                        self.scrollView.alpha = 0
+                        self.scrollView.transform = .identity
+                        self.isCompletingDismissGesture = false
+                        self.reportResolvedImageLayoutIfPossible()
+                        self.onAdjacentPageRequest?(pageDelta)
+                    }
                 } else {
                     restoreImageAfterCancelledDismissal()
                 }
@@ -4271,6 +4305,7 @@ struct FullScreenImageView: View {
     }
     @State private var originalLoadStates: [String: FullScreenOriginalImageLoadState]
     @State private var originalLoadRequests: [String: Int]
+    @State private var pageTurnDirection: Int = 1
     @State private var originalLoadProgresses: [String: BoundedURLSessionProgress] = [:]
     @State private var originalFileSizes: [String: Int64] = [:]
     @State private var isDownloading = false
@@ -4401,8 +4436,22 @@ struct FullScreenImageView: View {
                     zoomableImage(item, index: currentIndex)
                         .id(item.id)
                         .ignoresSafeArea()
+                        .transition(
+                            .asymmetric(
+                                insertion: .move(
+                                    edge: pageTurnDirection > 0 ? .trailing : .leading
+                                ).combined(with: .opacity),
+                                removal: .move(
+                                    edge: pageTurnDirection > 0 ? .leading : .trailing
+                                ).combined(with: .opacity)
+                            )
+                        )
                 }
             }
+            .animation(
+                .interactiveSpring(response: 0.34, dampingFraction: 0.9),
+                value: currentIndex
+            )
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片浏览器")
             .accessibilityIdentifier("full-screen-image-pager")
@@ -4545,7 +4594,10 @@ struct FullScreenImageView: View {
             onAdjacentPageRequest: { delta in
                 let target = currentIndex + delta
                 guard items.indices.contains(target) else { return }
-                currentIndex = target
+                pageTurnDirection = delta >= 0 ? 1 : -1
+                withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.9)) {
+                    currentIndex = target
+                }
             }
         )
         .contentShape(Rectangle())
