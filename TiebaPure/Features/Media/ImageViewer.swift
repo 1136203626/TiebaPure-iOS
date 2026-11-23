@@ -2045,6 +2045,31 @@ private final class ImagePreviewHostingController: UIHostingController<FullScree
     private var didBeginDismissal = false
     private var didFinishDismissal = false
     private var dismissalInteractionGate: MediaPreviewDismissalInteractionGate?
+    private var expandFreezeOverlay: UIImageView?
+
+    /// Pixel-freeze the visible preview while list-page gallery expand rebuilds
+    /// TabView. SwiftUI-level covers still allow one frame of the rebuild to show.
+    func installExpandFreezeOverlay() {
+        removeExpandFreezeOverlay()
+        guard view.bounds.width > 1, view.bounds.height > 1 else { return }
+        let renderer = UIGraphicsImageRenderer(bounds: view.bounds)
+        let snapshot = renderer.image { context in
+            view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
+        }
+        let overlay = UIImageView(image: snapshot)
+        overlay.frame = view.bounds
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.contentMode = .scaleToFill
+        overlay.isUserInteractionEnabled = false
+        overlay.accessibilityElementsHidden = true
+        view.addSubview(overlay)
+        expandFreezeOverlay = overlay
+    }
+
+    func removeExpandFreezeOverlay() {
+        expandFreezeOverlay?.removeFromSuperview()
+        expandFreezeOverlay = nil
+    }
 
     init(
         session: ImagePreviewSession,
@@ -2376,15 +2401,25 @@ final class ImagePreviewCoordinator {
     ) {
         guard let gallery = activeGallery,
               gallery.sessionID == sessionID,
-              activeController?.session.id == sessionID else {
+              let controller = activeController,
+              controller.session.id == sessionID else {
             return
         }
-        // Expanding the gallery replaces the item array; suppress implicit
-        // animations so the current page does not cross-fade / flash.
+        // Freeze exact on-screen pixels in UIKit before TabView rebuilds.
+        // This is the only reliable way to hide the full-image fade that happens
+        // when the current page controller is torn down and recreated.
+        controller.installExpandFreezeOverlay()
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             _ = gallery.expand(images: images, focus: focus)
+        }
+        // Keep the pixel freeze until the rebuilt pager has had time to attach
+        // the current page under the overlay, then lift it without animation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            UIView.performWithoutAnimation {
+                controller.removeExpandFreezeOverlay()
+            }
         }
     }
 
@@ -3174,6 +3209,11 @@ private final class FullScreenZoomImageController: UIViewController,
             resolvedImageView.alpha = 1
             placeholderImageView.alpha = 0
             didRevealResolvedImage = true
+            // Treat the seeded frame as the automatic preview so expand-rebuild
+            // does not start another load that reassigns the layer contents.
+            didResolveAutomaticPreview = true
+            resolvedImage = placeholderImage
+            transitionImage = placeholderImage
         } else {
             resolvedImageView.alpha = placeholderImage == nil ? 1 : 0
         }
@@ -4045,6 +4085,10 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
     let sessionID: UUID
     @Published private(set) var items: [FullScreenImageItem]
     @Published var currentIndex: Int
+    /// TabView selection key. Must stay on the same image id across expand so the
+    /// page controller does not tear down the visible page when its index shifts
+    /// (e.g. summary index 0 -> full-gallery index 12).
+    @Published var currentItemID: String
     /// Non-nil while the gallery data is being replaced after list-page full-floor load.
     /// FullScreenImageView draws this as a cover so TabView rebuild does not flash.
     @Published private(set) var expandCoverImage: UIImage?
@@ -4053,6 +4097,26 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
 
     func noteResolvedImage(_ image: UIImage, forItemID itemID: String) {
         resolvedImageByID[itemID] = image
+    }
+
+    private static func itemID(in items: [FullScreenImageItem], at index: Int) -> String {
+        let clamped = ImagePreviewIndexPolicy.clampedIndex(index, totalCount: max(items.count, 1))
+        guard items.indices.contains(clamped) else { return "empty" }
+        return items[clamped].id
+    }
+
+    func selectItemID(_ itemID: String) {
+        guard currentItemID != itemID else { return }
+        currentItemID = itemID
+        if let index = items.firstIndex(where: { $0.id == itemID }) {
+            currentIndex = index
+        }
+    }
+
+    func selectIndex(_ index: Int) {
+        let clamped = ImagePreviewIndexPolicy.clampedIndex(index, totalCount: max(items.count, 1))
+        currentIndex = clamped
+        currentItemID = Self.itemID(in: items, at: clamped)
     }
 
     init(session: ImagePreviewSession) {
@@ -4065,19 +4129,23 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
             )
         }
         items = resolved
-        currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+        let index = ImagePreviewIndexPolicy.clampedIndex(
             session.initialIndex,
             totalCount: max(resolved.count, 1)
         )
+        currentIndex = index
+        currentItemID = Self.itemID(in: resolved, at: index)
     }
 
     init(items: [FullScreenImageItem], currentIndex: Int = 0, sessionID: UUID = UUID()) {
         self.sessionID = sessionID
         self.items = items
-        self.currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+        let index = ImagePreviewIndexPolicy.clampedIndex(
             currentIndex,
             totalCount: max(items.count, 1)
         )
+        self.currentIndex = index
+        self.currentItemID = Self.itemID(in: items, at: index)
     }
 
     @discardableResult
@@ -4134,23 +4202,30 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
             return false
         }
 
-        // Cover the pager while TabView rebuilds around the new full-floor data set.
-        // List-page previews start from a short summary gallery; swapping in every
-        // floor's images otherwise flashes the current page even with stable ids.
+        // Cover the pager while TabView inserts the new full-floor pages.
         if let current {
             expandCoverImage = resolvedImageByID[current.id] ?? current.placeholderImage
         } else {
             expandCoverImage = nil
         }
+        // Keep selecting the same item *id* so TabView does not treat expand as a
+        // page turn (index 0 -> index N was destroying the visible page VC).
+        let preferredID = current?.id
         UIView.performWithoutAnimation {
             items = newItems
-            if let matchedIndex {
+            if let preferredID, let matchedByID = newItems.firstIndex(where: { $0.id == preferredID }) {
+                currentIndex = matchedByID
+                currentItemID = preferredID
+            } else if let matchedIndex {
                 currentIndex = matchedIndex
+                currentItemID = Self.itemID(in: newItems, at: matchedIndex)
             } else {
-                currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+                let clamped = ImagePreviewIndexPolicy.clampedIndex(
                     currentIndex,
                     totalCount: newItems.count
                 )
+                currentIndex = clamped
+                currentItemID = Self.itemID(in: newItems, at: clamped)
             }
         }
         // Keep the cover up long enough for TabView/UIPageViewController to
@@ -4179,7 +4254,7 @@ struct FullScreenImageView: View {
     private var items: [FullScreenImageItem] { gallery.items }
     private var currentIndex: Int {
         get { gallery.currentIndex }
-        nonmutating set { gallery.currentIndex = newValue }
+        nonmutating set { gallery.selectIndex(newValue) }
     }
     @State private var originalLoadStates: [String: FullScreenOriginalImageLoadState]
     @State private var originalLoadRequests: [String: Int]
@@ -4302,15 +4377,16 @@ struct FullScreenImageView: View {
             Color.black
                 .ignoresSafeArea()
 
-            // Always use TabView, even for a single image. List-page previews often
-            // start with one summary image and later expand to the full-floor gallery;
-            // switching between a plain view and TabView caused a visible flash.
+            // Selection is the stable item id (URL), not the integer index.
+            // List-page expand shifts the focused image's index (0 -> N); if
+            // TabView selection were the index it would tear down the page and
+            // flash the image content while the page counter updates.
             Group {
-                TabView(selection: $gallery.currentIndex) {
+                TabView(selection: $gallery.currentItemID) {
                     ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                         zoomableImage(item, index: index)
                             .ignoresSafeArea()
-                            .tag(index)
+                            .tag(item.id)
                     }
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
@@ -4380,6 +4456,12 @@ struct FullScreenImageView: View {
         .compatibleOnChange(of: currentIndex) { _, index in
             transitionState.setCurrentIndex(index)
             onCurrentIndexChange?(index)
+        }
+        .compatibleOnChange(of: gallery.currentItemID) { _, itemID in
+            if let index = items.firstIndex(where: { $0.id == itemID }),
+               index != currentIndex {
+                gallery.currentIndex = index
+            }
         }
         .onReceive(gallery.$items) { newItems in
             var states = originalLoadStates
