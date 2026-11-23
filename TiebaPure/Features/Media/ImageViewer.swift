@@ -2379,7 +2379,13 @@ final class ImagePreviewCoordinator {
               activeController?.session.id == sessionID else {
             return
         }
-        _ = gallery.expand(images: images, focus: focus)
+        // Expanding the gallery replaces the item array; suppress implicit
+        // animations so the current page does not cross-fade / flash.
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            _ = gallery.expand(images: images, focus: focus)
+        }
     }
 
     func jumpToPostAfterDismiss(_ postID: UInt64) {
@@ -2716,7 +2722,13 @@ private struct FullScreenImageItem: Identifiable {
     let sourceFloor: Int?
 
     init(image: ImageContent, index: Int, placeholderImage: UIImage? = nil) {
-        id = "\(index)-\(image.originalURL?.absoluteString ?? image.thumbnailURL?.absoluteString ?? "missing")"
+        // Stable identity across gallery expand so TabView can reuse the current page
+        // instead of tearing it down when summary images are replaced by full-floor images.
+        if let urlKey = (image.originalURL ?? image.thumbnailURL)?.absoluteString, urlKey.isEmpty == false {
+            id = urlKey
+        } else {
+            id = "missing-\(image.sourcePostID ?? 0)-\(image.sourceFloor ?? 0)-\(index)"
+        }
         let sources = FullScreenImageSourcePolicy.sources(
             thumbnail: image.thumbnailURL,
             original: image.originalURL
@@ -2732,7 +2744,7 @@ private struct FullScreenImageItem: Identifiable {
     }
 
     init(url: URL?, index: Int) {
-        id = "\(index)-\(url?.absoluteString ?? "missing")"
+        id = url?.absoluteString ?? "missing-\(index)"
         let sources = FullScreenImageSourcePolicy.sources(thumbnail: url, original: url)
         primaryURL = sources.previewURL
         fallbackURL = nil
@@ -4039,8 +4051,37 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
         let current = items.indices.contains(currentIndex) ? items[currentIndex] : nil
         let currentURL = current?.originalURL ?? current?.primaryURL
 
-        let newItems = images.enumerated().map { index, image in
-            FullScreenImageItem(image: image, index: index)
+        // Preserve already-decoded placeholders for images that remain after expand.
+        // Without this, the visible page is recreated empty and flashes when the
+        // list-page summary gallery is replaced by the full-floor gallery.
+        var existingPlaceholderByID: [String: UIImage] = [:]
+        for item in items {
+            if let placeholder = item.placeholderImage {
+                existingPlaceholderByID[item.id] = placeholder
+            }
+        }
+
+        let newItems = images.enumerated().map { index, image -> FullScreenImageItem in
+            let candidate = FullScreenImageItem(image: image, index: index)
+            if let placeholder = existingPlaceholderByID[candidate.id] {
+                return FullScreenImageItem(
+                    image: image,
+                    index: index,
+                    placeholderImage: placeholder
+                )
+            }
+            if let current,
+               let placeholder = current.placeholderImage,
+               (candidate.originalURL == currentURL || candidate.primaryURL == currentURL
+                || candidate.originalURL == current.originalURL
+                || candidate.primaryURL == current.primaryURL) {
+                return FullScreenImageItem(
+                    image: image,
+                    index: index,
+                    placeholderImage: placeholder
+                )
+            }
+            return candidate
         }
         let shouldReplace = newItems.count > items.count
             || newItems.contains(where: { ($0.sourceFloor ?? 1) > 1 })
@@ -4205,21 +4246,19 @@ struct FullScreenImageView: View {
             Color.black
                 .ignoresSafeArea()
 
+            // Always use TabView, even for a single image. List-page previews often
+            // start with one summary image and later expand to the full-floor gallery;
+            // switching between a plain view and TabView caused a visible flash.
             Group {
-                if items.count == 1, let item = items.first {
-                    zoomableImage(item, index: 0)
-                        .ignoresSafeArea()
-                } else {
-                    TabView(selection: $gallery.currentIndex) {
-                        ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                            zoomableImage(item, index: index)
-                                .ignoresSafeArea()
-                                .tag(index)
-                        }
+                TabView(selection: $gallery.currentIndex) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        zoomableImage(item, index: index)
+                            .ignoresSafeArea()
+                            .tag(index)
                     }
-                    .tabViewStyle(.page(indexDisplayMode: .never))
-                    .ignoresSafeArea()
                 }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .ignoresSafeArea()
             }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片浏览器")
