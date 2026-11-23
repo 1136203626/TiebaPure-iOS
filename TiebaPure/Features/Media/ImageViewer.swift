@@ -4018,6 +4018,15 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
     let sessionID: UUID
     @Published private(set) var items: [FullScreenImageItem]
     @Published var currentIndex: Int
+    /// Non-nil while the gallery data is being replaced after list-page full-floor load.
+    /// FullScreenImageView draws this as a cover so TabView rebuild does not flash.
+    @Published private(set) var expandCoverImage: UIImage?
+    /// Latest decoded frame per stable item id, used as a higher-quality expand cover.
+    private var resolvedImageByID: [String: UIImage] = [:]
+
+    func noteResolvedImage(_ image: UIImage, forItemID itemID: String) {
+        resolvedImageByID[itemID] = image
+    }
 
     init(session: ImagePreviewSession) {
         sessionID = session.id
@@ -4052,8 +4061,6 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
         let currentURL = current?.originalURL ?? current?.primaryURL
 
         // Preserve already-decoded placeholders for images that remain after expand.
-        // Without this, the visible page is recreated empty and flashes when the
-        // list-page summary gallery is replaced by the full-floor gallery.
         var existingPlaceholderByID: [String: UIImage] = [:]
         for item in items {
             if let placeholder = item.placeholderImage {
@@ -4097,14 +4104,29 @@ fileprivate final class ImagePreviewGalleryModel: ObservableObject {
             return false
         }
 
-        items = newItems
-        if let matchedIndex {
-            currentIndex = matchedIndex
+        // Cover the pager while TabView rebuilds around the new full-floor data set.
+        // List-page previews start from a short summary gallery; swapping in every
+        // floor's images otherwise flashes the current page even with stable ids.
+        if let current {
+            expandCoverImage = resolvedImageByID[current.id] ?? current.placeholderImage
         } else {
-            currentIndex = ImagePreviewIndexPolicy.clampedIndex(
-                currentIndex,
-                totalCount: newItems.count
-            )
+            expandCoverImage = nil
+        }
+        UIView.performWithoutAnimation {
+            items = newItems
+            if let matchedIndex {
+                currentIndex = matchedIndex
+            } else {
+                currentIndex = ImagePreviewIndexPolicy.clampedIndex(
+                    currentIndex,
+                    totalCount: newItems.count
+                )
+            }
+        }
+        // Keep the cover up long enough for TabView/UIPageViewController to
+        // rebuild pages and for the current page representable to reattach.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            self?.expandCoverImage = nil
         }
         return true
     }
@@ -4268,6 +4290,21 @@ struct FullScreenImageView: View {
                 Spacer(minLength: 0)
                 bottomBar
             }
+
+            // Static cover drawn above the pager while list-page gallery expand
+            // rebuilds TabView. Without this the screen flashes even if the
+            // underlying item id is stable.
+            if let expandCoverImage = gallery.expandCoverImage {
+                ZStack {
+                    Color.black
+                    Image(uiImage: expandCoverImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                }
+                .ignoresSafeArea()
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+            }
         }
         .accessibilityHint("双指捏合或双击缩放，单指可斜向拖动图片，轻点图片返回来源页面")
         .accessibilityAction(.escape) {
@@ -4358,10 +4395,11 @@ struct FullScreenImageView: View {
             placeholderImage: item.placeholderImage,
             transitionState: transitionState,
             imageIndex: index,
-            coordinatesWithParentPager: items.count > 1,
+            coordinatesWithParentPager: true,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
             originalLoadRequest: originalLoadRequests[item.id, default: 0],
             onImageResolved: { image, frameInWindow in
+                gallery.noteResolvedImage(image, forItemID: item.id)
                 onCurrentImageResolved?(index, image, frameInWindow)
             },
             onOriginalLoadStateChange: { state in
