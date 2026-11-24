@@ -345,15 +345,18 @@ struct SearchResultsView: View {
                                         onOpenMedia: { item, mediaItems, sourceFrame, sourceImage, sourceAnchor in
                                             switch HomeMediaActionPolicy.action(for: item, in: mediaItems) {
                                             case let .previewImages(images, index):
-                                                ImagePreviewCoordinator.shared.present(
-                                                    ImagePreviewSession(
-                                                        images: images,
-                                                        initialIndex: index,
-                                                        sourceFrame: sourceFrame,
-                                                        sourceImage: sourceImage,
-                                                        sourceAnchor: sourceAnchor,
-                                                        prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual
-                                                    )
+                                                // Match home/forum feed: open summary images immediately,
+                                                // then expand to the full-floor gallery in the background.
+                                                ThreadImagePreviewPresenter.presentFromFeed(
+                                                    thread: thread,
+                                                    summaryImages: images,
+                                                    initialIndex: index,
+                                                    account: account,
+                                                    api: environment.api,
+                                                    sourceFrame: sourceFrame,
+                                                    sourceImage: sourceImage,
+                                                    sourceAnchor: sourceAnchor,
+                                                    prefetchesAdjacentPages: readingPreferences.mediaLoading != .manual
                                                 )
                                             case let .playVideo(video):
                                                 VideoPreviewCoordinator.shared.present(
