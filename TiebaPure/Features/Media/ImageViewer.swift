@@ -2913,6 +2913,271 @@ enum FullScreenImagePlaceholderPolicy {
     }
 }
 
+
+/// Photos-style interactive paging that reuses page VCs by stable image id.
+/// SwiftUI TabView rebuilds the focused page when item count jumps during
+/// list-page full-floor expand; this controller keeps the visible VC alive.
+@MainActor
+private final class FullScreenImageGalleryPageController: UIPageViewController,
+    UIPageViewControllerDataSource,
+    UIPageViewControllerDelegate
+{
+    private let transitionState: ImagePreviewPresentationState
+    private let prefetchesAdjacentPages: Bool
+    private var items: [FullScreenImageItem] = []
+    private var pageControllers: [String: FullScreenZoomImageController] = [:]
+    private var focusedItemID: String = ""
+    private var originalLoadRequests: [String: Int] = [:]
+
+    var onSelectItemID: ((String) -> Void)?
+    var onImageResolved: ((String, Int, UIImage, CGRect?) -> Void)?
+    var onOriginalLoadStateChange: ((String, FullScreenOriginalImageLoadState) -> Void)?
+    var onOriginalLoadProgressChange: ((String, BoundedURLSessionProgress?) -> Void)?
+    var onOriginalFileSizeChange: ((String, Int64?) -> Void)?
+    var onZoomStateChange: ((Int, Bool) -> Void)?
+    var onSingleTap: (() -> Void)?
+    var onInteractiveDismiss: (() -> Void)?
+
+    init(
+        transitionState: ImagePreviewPresentationState,
+        prefetchesAdjacentPages: Bool
+    ) {
+        self.transitionState = transitionState
+        self.prefetchesAdjacentPages = prefetchesAdjacentPages
+        super.init(
+            transitionStyle: .scroll,
+            navigationOrientation: .horizontal,
+            options: [.interPageSpacing: 12]
+        )
+        dataSource = self
+        delegate = self
+        view.backgroundColor = .black
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func apply(
+        items: [FullScreenImageItem],
+        focusedItemID: String,
+        originalLoadRequests: [String: Int]
+    ) {
+        self.originalLoadRequests = originalLoadRequests
+        let previousFocusedID = self.focusedItemID
+        let validIDs = Set(items.map(\.id))
+        self.items = items
+        pageControllers = pageControllers.filter { validIDs.contains($0.key) }
+
+        for (index, item) in items.enumerated() {
+            guard let page = pageControllers[item.id] else { continue }
+            page.updatePagingContext(imageIndex: index, totalImageCount: items.count)
+            bindCallbacks(to: page, item: item, index: index)
+            page.requestOriginalImage(ifNewRequest: originalLoadRequests[item.id, default: 0])
+        }
+
+        let targetID: String
+        if validIDs.contains(focusedItemID) {
+            targetID = focusedItemID
+        } else {
+            targetID = items.first?.id ?? ""
+        }
+        self.focusedItemID = targetID
+        guard targetID.isEmpty == false else { return }
+
+        // Same focused image after expand: keep the existing VC. Re-setting the
+        // page controller is what caused the content-area flash.
+        if previousFocusedID == targetID,
+           let current = viewControllers?.first as? FullScreenZoomImageController,
+           current.itemID == targetID
+        {
+            return
+        }
+
+        guard let page = pageController(for: targetID) else { return }
+        UIView.performWithoutAnimation {
+            setViewControllers([page], direction: .forward, animated: false)
+        }
+    }
+
+    private func pageController(for itemID: String) -> FullScreenZoomImageController? {
+        if let existing = pageControllers[itemID] {
+            return existing
+        }
+        guard let index = items.firstIndex(where: { $0.id == itemID }) else { return nil }
+        let item = items[index]
+        let page = makePage(item: item, index: index)
+        pageControllers[itemID] = page
+        return page
+    }
+
+    private func makePage(item: FullScreenImageItem, index: Int) -> FullScreenZoomImageController {
+        let page = FullScreenZoomImageController(
+            primaryURL: item.primaryURL,
+            fallbackURL: item.fallbackURL,
+            originalURL: item.originalURL,
+            imageAspectRatio: item.imageAspectRatio,
+            placeholderImage: item.placeholderImage,
+            transitionState: transitionState,
+            imageIndex: index,
+            totalImageCount: items.count,
+            coordinatesWithParentPager: true,
+            prefetchesAdjacentPages: prefetchesAdjacentPages,
+            itemID: item.id,
+            onImageResolved: { _, _ in },
+            onOriginalLoadStateChange: { _ in },
+            onOriginalLoadProgressChange: { _ in },
+            onOriginalFileSizeChange: { _ in },
+            onZoomStateChange: { _ in },
+            onSingleTap: {},
+            onInteractiveDismiss: {},
+            onAdjacentPageRequest: { _ in }
+        )
+        bindCallbacks(to: page, item: item, index: index)
+        page.requestOriginalImage(ifNewRequest: originalLoadRequests[item.id, default: 0])
+        return page
+    }
+
+    private func bindCallbacks(
+        to page: FullScreenZoomImageController,
+        item: FullScreenImageItem,
+        index: Int
+    ) {
+        let itemID = item.id
+        page.onImageResolved = { [weak self] image, frame in
+            self?.onImageResolved?(itemID, index, image, frame)
+        }
+        page.onOriginalLoadStateChange = { [weak self] state in
+            self?.onOriginalLoadStateChange?(itemID, state)
+        }
+        page.onOriginalLoadProgressChange = { [weak self] progress in
+            self?.onOriginalLoadProgressChange?(itemID, progress)
+        }
+        page.onOriginalFileSizeChange = { [weak self] size in
+            self?.onOriginalFileSizeChange?(itemID, size)
+        }
+        page.onZoomStateChange = { [weak self] isZoomed in
+            self?.onZoomStateChange?(index, isZoomed)
+        }
+        page.onSingleTap = { [weak self] in
+            self?.onSingleTap?()
+        }
+        page.onInteractiveDismiss = { [weak self] in
+            self?.onInteractiveDismiss?()
+        }
+        page.onAdjacentPageRequest = { [weak self] delta in
+            guard let self else { return }
+            let target = index + delta
+            guard self.items.indices.contains(target) else { return }
+            let targetID = self.items[target].id
+            self.focusedItemID = targetID
+            if let page = self.pageController(for: targetID) {
+                let direction: UIPageViewController.NavigationDirection =
+                    delta > 0 ? .forward : .reverse
+                self.setViewControllers([page], direction: direction, animated: true)
+            }
+            self.onSelectItemID?(targetID)
+        }
+    }
+
+    func pageViewController(
+        _ pageViewController: UIPageViewController,
+        viewControllerBefore viewController: UIViewController
+    ) -> UIViewController? {
+        guard let page = viewController as? FullScreenZoomImageController,
+              let index = items.firstIndex(where: { $0.id == page.itemID }),
+              index > 0
+        else {
+            return nil
+        }
+        return pageController(for: items[index - 1].id)
+    }
+
+    func pageViewController(
+        _ pageViewController: UIPageViewController,
+        viewControllerAfter viewController: UIViewController
+    ) -> UIViewController? {
+        guard let page = viewController as? FullScreenZoomImageController,
+              let index = items.firstIndex(where: { $0.id == page.itemID }),
+              index < items.count - 1
+        else {
+            return nil
+        }
+        return pageController(for: items[index + 1].id)
+    }
+
+    func pageViewController(
+        _ pageViewController: UIPageViewController,
+        didFinishAnimating finished: Bool,
+        previousViewControllers: [UIViewController],
+        transitionCompleted completed: Bool
+    ) {
+        guard completed,
+              let page = viewControllers?.first as? FullScreenZoomImageController
+        else {
+            return
+        }
+        focusedItemID = page.itemID
+        onSelectItemID?(page.itemID)
+    }
+}
+
+private struct FullScreenImageGalleryPager: UIViewControllerRepresentable {
+    @ObservedObject var gallery: ImagePreviewGalleryModel
+    let transitionState: ImagePreviewPresentationState
+    let prefetchesAdjacentPages: Bool
+    let originalLoadRequests: [String: Int]
+    let onSelectItemID: (String) -> Void
+    let onImageResolved: (String, Int, UIImage, CGRect?) -> Void
+    let onOriginalLoadStateChange: (String, FullScreenOriginalImageLoadState) -> Void
+    let onOriginalLoadProgressChange: (String, BoundedURLSessionProgress?) -> Void
+    let onOriginalFileSizeChange: (String, Int64?) -> Void
+    let onZoomStateChange: (Int, Bool) -> Void
+    let onSingleTap: () -> Void
+    let onInteractiveDismiss: () -> Void
+
+    func makeUIViewController(context: Context) -> FullScreenImageGalleryPageController {
+        let controller = FullScreenImageGalleryPageController(
+            transitionState: transitionState,
+            prefetchesAdjacentPages: prefetchesAdjacentPages
+        )
+        controller.onSelectItemID = onSelectItemID
+        controller.onImageResolved = onImageResolved
+        controller.onOriginalLoadStateChange = onOriginalLoadStateChange
+        controller.onOriginalLoadProgressChange = onOriginalLoadProgressChange
+        controller.onOriginalFileSizeChange = onOriginalFileSizeChange
+        controller.onZoomStateChange = onZoomStateChange
+        controller.onSingleTap = onSingleTap
+        controller.onInteractiveDismiss = onInteractiveDismiss
+        controller.apply(
+            items: gallery.items,
+            focusedItemID: gallery.currentItemID,
+            originalLoadRequests: originalLoadRequests
+        )
+        return controller
+    }
+
+    func updateUIViewController(
+        _ uiViewController: FullScreenImageGalleryPageController,
+        context: Context
+    ) {
+        uiViewController.onSelectItemID = onSelectItemID
+        uiViewController.onImageResolved = onImageResolved
+        uiViewController.onOriginalLoadStateChange = onOriginalLoadStateChange
+        uiViewController.onOriginalLoadProgressChange = onOriginalLoadProgressChange
+        uiViewController.onOriginalFileSizeChange = onOriginalFileSizeChange
+        uiViewController.onZoomStateChange = onZoomStateChange
+        uiViewController.onSingleTap = onSingleTap
+        uiViewController.onInteractiveDismiss = onInteractiveDismiss
+        uiViewController.apply(
+            items: gallery.items,
+            focusedItemID: gallery.currentItemID,
+            originalLoadRequests: originalLoadRequests
+        )
+    }
+}
+
 private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
     let primaryURL: URL?
     let fallbackURL: URL?
@@ -2922,6 +3187,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
     let transitionState: ImagePreviewPresentationState
     let imageIndex: Int
     let totalImageCount: Int
+    let itemID: String
     let coordinatesWithParentPager: Bool
     let prefetchesAdjacentPages: Bool
     let originalLoadRequest: Int
@@ -2946,6 +3212,7 @@ private struct FullScreenZoomableRemoteImage: UIViewControllerRepresentable {
             totalImageCount: totalImageCount,
             coordinatesWithParentPager: coordinatesWithParentPager,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
+            itemID: itemID,
             onImageResolved: onImageResolved,
             onOriginalLoadStateChange: onOriginalLoadStateChange,
             onOriginalLoadProgressChange: onOriginalLoadProgressChange,
@@ -3011,6 +3278,7 @@ private final class FullScreenZoomImageController: UIViewController,
     private let transitionState: ImagePreviewPresentationState
     private let coordinatesWithParentPager: Bool
     private let prefetchesAdjacentPages: Bool
+    let itemID: String
     private var imageIndex: Int
     private var lastViewportSize: CGSize = .zero
     private var resolvedImage: UIImage?
@@ -3073,6 +3341,7 @@ private final class FullScreenZoomImageController: UIViewController,
         totalImageCount: Int,
         coordinatesWithParentPager: Bool,
         prefetchesAdjacentPages: Bool,
+        itemID: String,
         onImageResolved: @escaping (UIImage, CGRect?) -> Void,
         onOriginalLoadStateChange: @escaping (FullScreenOriginalImageLoadState) -> Void,
         onOriginalLoadProgressChange: @escaping (BoundedURLSessionProgress?) -> Void,
@@ -3092,6 +3361,7 @@ private final class FullScreenZoomImageController: UIViewController,
         self.totalImageCount = max(totalImageCount, 1)
         self.coordinatesWithParentPager = coordinatesWithParentPager
         self.prefetchesAdjacentPages = prefetchesAdjacentPages
+        self.itemID = itemID
         if FullScreenImagePlaceholderPolicy.canReuseAsPreview(
             placeholderSize: placeholderImage?.size,
             imageAspectRatio: imageAspectRatio
@@ -4424,21 +4694,50 @@ struct FullScreenImageView: View {
             Color.black
                 .ignoresSafeArea()
 
-            // Page-style TabView matches the system Photos interactive swipe
-            // (finger-tracking page curl between images). Selection is the
-            // stable image id so list-page gallery expand does not tear down the
-            // visible page when its integer index shifts.
-            Group {
-                TabView(selection: $gallery.currentItemID) {
-                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                        zoomableImage(item, index: index)
-                            .ignoresSafeArea()
-                            .tag(item.id)
+            // UIPageViewController (.scroll) = Photos-like interactive swipe.
+            // Pages are cached by stable image id so full-floor expand does not
+            // recreate the visible page (the TabView flash regression).
+            FullScreenImageGalleryPager(
+                gallery: gallery,
+                transitionState: transitionState,
+                prefetchesAdjacentPages: prefetchesAdjacentPages,
+                originalLoadRequests: originalLoadRequests,
+                onSelectItemID: { itemID in
+                    gallery.selectItemID(itemID)
+                },
+                onImageResolved: { itemID, index, image, frameInWindow in
+                    gallery.noteResolvedImage(image, forItemID: itemID)
+                    onCurrentImageResolved?(index, image, frameInWindow)
+                },
+                onOriginalLoadStateChange: { itemID, state in
+                    guard originalLoadStates[itemID] != state else { return }
+                    originalLoadStates[itemID] = state
+                },
+                onOriginalLoadProgressChange: { itemID, progress in
+                    if let progress {
+                        originalLoadProgresses[itemID] = progress
+                    } else {
+                        originalLoadProgresses.removeValue(forKey: itemID)
                     }
+                },
+                onOriginalFileSizeChange: { itemID, fileSize in
+                    if let fileSize {
+                        originalFileSizes[itemID] = fileSize
+                    } else {
+                        originalFileSizes.removeValue(forKey: itemID)
+                    }
+                },
+                onZoomStateChange: { index, isZoomed in
+                    onZoomStateChange?(index, isZoomed)
+                },
+                onSingleTap: {
+                    close()
+                },
+                onInteractiveDismiss: {
+                    close()
                 }
-                .tabViewStyle(.page(indexDisplayMode: .never))
-                .ignoresSafeArea()
-            }
+            )
+            .ignoresSafeArea()
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片浏览器")
             .accessibilityIdentifier("full-screen-image-pager")
@@ -4544,6 +4843,7 @@ struct FullScreenImageView: View {
             transitionState: transitionState,
             imageIndex: index,
             totalImageCount: items.count,
+            itemID: item.id,
             coordinatesWithParentPager: true,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
             originalLoadRequest: originalLoadRequests[item.id, default: 0],
