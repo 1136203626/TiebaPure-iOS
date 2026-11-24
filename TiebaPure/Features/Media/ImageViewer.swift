@@ -4305,7 +4305,6 @@ struct FullScreenImageView: View {
     }
     @State private var originalLoadStates: [String: FullScreenOriginalImageLoadState]
     @State private var originalLoadRequests: [String: Int]
-    @State private var pageTurnDirection: Int = 1
     @State private var originalLoadProgresses: [String: BoundedURLSessionProgress] = [:]
     @State private var originalFileSizes: [String: Int64] = [:]
     @State private var isDownloading = false
@@ -4425,33 +4424,21 @@ struct FullScreenImageView: View {
             Color.black
                 .ignoresSafeArea()
 
-            // Render ONLY the current page, keyed by stable image id.
-            // List-page expand used to feed a TabView whose selection was an
-            // integer index; when the focused image moved from index 0 to N the
-            // page controller tore the visible VC down and the image faded.
-            // Keeping a single representable alive across expand eliminates that.
+            // Page-style TabView matches the system Photos interactive swipe
+            // (finger-tracking page curl between images). Selection is the
+            // stable image id so list-page gallery expand does not tear down the
+            // visible page when its integer index shifts.
             Group {
-                if items.indices.contains(currentIndex) {
-                    let item = items[currentIndex]
-                    zoomableImage(item, index: currentIndex)
-                        .id(item.id)
-                        .ignoresSafeArea()
-                        .transition(
-                            .asymmetric(
-                                insertion: .move(
-                                    edge: pageTurnDirection > 0 ? .trailing : .leading
-                                ).combined(with: .opacity),
-                                removal: .move(
-                                    edge: pageTurnDirection > 0 ? .leading : .trailing
-                                ).combined(with: .opacity)
-                            )
-                        )
+                TabView(selection: $gallery.currentItemID) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        zoomableImage(item, index: index)
+                            .ignoresSafeArea()
+                            .tag(item.id)
+                    }
                 }
+                .tabViewStyle(.page(indexDisplayMode: .never))
+                .ignoresSafeArea()
             }
-            .animation(
-                .interactiveSpring(response: 0.34, dampingFraction: 0.9),
-                value: currentIndex
-            )
             .accessibilityElement(children: .contain)
             .accessibilityLabel("图片浏览器")
             .accessibilityIdentifier("full-screen-image-pager")
@@ -4557,7 +4544,7 @@ struct FullScreenImageView: View {
             transitionState: transitionState,
             imageIndex: index,
             totalImageCount: items.count,
-            coordinatesWithParentPager: false,
+            coordinatesWithParentPager: true,
             prefetchesAdjacentPages: prefetchesAdjacentPages,
             originalLoadRequest: originalLoadRequests[item.id, default: 0],
             onImageResolved: { image, frameInWindow in
@@ -4594,10 +4581,9 @@ struct FullScreenImageView: View {
             onAdjacentPageRequest: { delta in
                 let target = currentIndex + delta
                 guard items.indices.contains(target) else { return }
-                pageTurnDirection = delta >= 0 ? 1 : -1
-                withAnimation(.interactiveSpring(response: 0.34, dampingFraction: 0.9)) {
-                    currentIndex = target
-                }
+                // Prefer id-based selection so TabView keeps Photos-style paging
+                // without rebuilding the focused page on expand-driven index shifts.
+                currentIndex = target
             }
         )
         .contentShape(Rectangle())
