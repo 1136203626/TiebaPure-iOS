@@ -4745,6 +4745,12 @@ struct FullScreenImageView: View {
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
                 bottomBar
+                    // Expand only updates the page label / optional floor button; keep
+                    // the chrome from animating or relayout-flashing under the image.
+                    .animation(nil, value: currentIndex)
+                    .animation(nil, value: items.count)
+                    .animation(nil, value: currentImageSourcePostID)
+                    .animation(nil, value: currentImageSourceFloor)
             }
         }
         .accessibilityHint("双指捏合或双击缩放，单指可斜向拖动图片，轻点图片返回来源页面")
@@ -4795,11 +4801,15 @@ struct FullScreenImageView: View {
             }
         }
         .onReceive(gallery.$items) { newItems in
-            var states = originalLoadStates
-            for item in newItems where states[item.id] == nil {
-                states[item.id] = item.originalURL == nil ? .unavailable : .available
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                var states = originalLoadStates
+                for item in newItems where states[item.id] == nil {
+                    states[item.id] = item.originalURL == nil ? .unavailable : .available
+                }
+                originalLoadStates = states
             }
-            originalLoadStates = states
             transitionState.setCurrentIndex(currentIndex)
             onCurrentIndexChange?(currentIndex)
         }
@@ -4910,14 +4920,20 @@ struct FullScreenImageView: View {
                 startPoint: .top,
                 endPoint: .bottom
             )
+            // Identity stays fixed so expand-driven text changes do not recreate
+            // the gradient layer (visible as a flash under the page indicator).
+            .id("full-screen-image-bottom-gradient")
         )
+        .transaction { transaction in
+            transaction.disablesAnimations = true
+        }
     }
 
     private var compactBottomBar: some View {
         HStack(spacing: TiebaPureTheme.Spacing.sm) {
-            if items.count > 1 {
-                pageIndicator
-            }
+            pageIndicator
+                .opacity(items.count > 1 ? 1 : 0)
+                .accessibilityHidden(items.count <= 1)
 
             Spacer(minLength: 0)
 
@@ -4929,11 +4945,11 @@ struct FullScreenImageView: View {
 
     private var stackedBottomBar: some View {
         VStack(spacing: TiebaPureTheme.Spacing.sm) {
-            if items.count > 1 {
-                HStack {
-                    pageIndicator
-                    Spacer(minLength: 0)
-                }
+            HStack {
+                pageIndicator
+                    .opacity(items.count > 1 ? 1 : 0)
+                    .accessibilityHidden(items.count <= 1)
+                Spacer(minLength: 0)
             }
             jumpToFloorButton
                 .frame(maxWidth: .infinity)
@@ -4945,33 +4961,41 @@ struct FullScreenImageView: View {
     }
 
     private var pageIndicator: some View {
-        Text("\(currentIndex + 1) / \(items.count)")
+        // Fixed metrics so "1 / 3" -> "12 / 48" does not reflow the chrome
+        // under the indicator when list-page expand updates the gallery.
+        Text("\(currentIndex + 1) / \(max(items.count, 1))")
             .font(.footnote.monospacedDigit().weight(.semibold))
+            .frame(minWidth: 72, alignment: .leading)
+            .contentTransition(.identity)
             .accessibilityIdentifier("image-page-indicator")
-            .accessibilityLabel("第\(currentIndex + 1)张，共\(items.count)张")
+            .accessibilityLabel("第\(currentIndex + 1)张，共\(max(items.count, 1))张")
     }
 
     @ViewBuilder
     private var jumpToFloorButton: some View {
-        if currentImageSourcePostID != nil {
-            Button {
-                showsJumpToFloorDialog = true
-            } label: {
-                Text(currentImageSourceFloor.map { floor in "跳转第\(floor)楼" } ?? "跳转楼层")
-                    .font((dynamicTypeSize.isAccessibilitySize
-                        ? Font.body
-                        : Font.footnote).weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .frame(
-                        maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil,
-                        minHeight: dynamicTypeSize.isAccessibilitySize ? 52 : 34
-                    )
-                    .background(.white.opacity(0.18), in: Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("跳转到图片所在楼层")
+        // Always keep the control in the hierarchy. Expand often attaches
+        // sourcePostID/floor only after full-floor load; inserting the button
+        // then reflows everything under the page indicator and flashes.
+        Button {
+            showsJumpToFloorDialog = true
+        } label: {
+            Text(currentImageSourceFloor.map { floor in "跳转第\(floor)楼" } ?? "跳转楼层")
+                .font((dynamicTypeSize.isAccessibilitySize
+                    ? Font.body
+                    : Font.footnote).weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .frame(
+                    maxWidth: dynamicTypeSize.isAccessibilitySize ? .infinity : nil,
+                    minHeight: dynamicTypeSize.isAccessibilitySize ? 52 : 34
+                )
+                .background(.white.opacity(0.18), in: Capsule())
         }
+        .buttonStyle(.plain)
+        .opacity(currentImageSourcePostID != nil ? 1 : 0)
+        .disabled(currentImageSourcePostID == nil)
+        .accessibilityHidden(currentImageSourcePostID == nil)
+        .accessibilityLabel("跳转到图片所在楼层")
     }
 
     private var viewOriginalButton: some View {
